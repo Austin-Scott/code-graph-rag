@@ -57,17 +57,40 @@ class CodeChangeEventHandler(FileSystemEventHandler):
         # --- Step 3: Re-parse the file if it was modified or created ---
         # This rebuilds the in-memory state (AST, function registry) for the single file.
         if event.event_type in ["modified", "created"]:
-            lang_config = get_language_config(path.suffix)
-            if lang_config and lang_config.name in self.updater.parsers:
-                result = self.updater.factory.definition_processor.process_file(
-                    path,
-                    lang_config.name,
-                    self.updater.queries,
-                    self.updater.factory.structure_processor.structural_elements,
-                )
-                if result:
-                    root_node, language = result
-                    self.updater.ast_cache[path] = (root_node, language)
+            if path.suffix == ".vue":
+                vue_script = self.updater._extract_vue_script_content(path)
+                if vue_script:
+                    script_language, script_source = vue_script
+                    if script_language in self.updater.parsers:
+                        result = self.updater.factory.definition_processor.process_file(
+                            path,
+                            script_language,
+                            self.updater.queries,
+                            self.updater.factory.structure_processor.structural_elements,
+                            source_code=script_source,
+                        )
+                        if result:
+                            root_node, language = result
+                            self.updater.ast_cache[path] = (root_node, language)
+                    else:
+                        logger.warning(
+                            f"Unsupported Vue script language '{script_language}' for {path}"
+                        )
+                else:
+                    logger.debug(f"No <script> tag found in Vue component: {path}")
+            else:
+                lang_config = get_language_config(path.suffix)
+                if lang_config and lang_config.name in self.updater.parsers:
+                    result = self.updater.factory.definition_processor.process_file(
+                        path,
+                        lang_config.name,
+                        self.updater.queries,
+                        self.updater.factory.structure_processor.structural_elements,
+                        source_code=None,
+                    )
+                    if result:
+                        root_node, language = result
+                        self.updater.ast_cache[path] = (root_node, language)
 
         # --- Step 4: Re-process all function calls across the entire codebase ---
         # This is the key to fixing the "island" problem. It ensures that changes

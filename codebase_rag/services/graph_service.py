@@ -2,8 +2,12 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
 
-import mgclient
 from loguru import logger
+
+try:  # pragma: no cover - optional dependency for integration environments
+    import mgclient  # type: ignore
+except ImportError:  # pragma: no cover - exercised indirectly via error handling
+    mgclient = None  # type: ignore[assignment]
 
 
 class MemgraphIngestor:
@@ -13,7 +17,7 @@ class MemgraphIngestor:
         self._host = host
         self._port = port
         self.batch_size = batch_size
-        self.conn: mgclient.Connection | None = None
+        self.conn: Any | None = None
         self.node_buffer: list[tuple[str, dict[str, Any]]] = []
         self.relationship_buffer: list[tuple[tuple, str, tuple, dict | None]] = []
         self.unique_constraints = {
@@ -29,6 +33,11 @@ class MemgraphIngestor:
         }
 
     def __enter__(self) -> "MemgraphIngestor":
+        if mgclient is None:  # pragma: no cover - executed in environments without mgclient
+            raise RuntimeError(
+                "mgclient is required to connect to Memgraph. Install the 'mgclient' package"
+                " or ensure Memgraph client libraries are available."
+            )
         logger.info(f"Connecting to Memgraph at {self._host}:{self._port}...")
         self.conn = mgclient.connect(host=self._host, port=self._port)
         self.conn.autocommit = True

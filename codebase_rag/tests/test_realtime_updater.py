@@ -34,6 +34,7 @@ def test_file_creation_flow(
         "python",
         mock_updater.queries,
         mock_updater.factory.structure_processor.structural_elements,
+        source_code=None,
     )
     mock_updater.ingestor.flush_all.assert_called_once()
 
@@ -54,6 +55,7 @@ def test_file_modification_flow(
         "python",
         mock_updater.queries,
         mock_updater.factory.structure_processor.structural_elements,
+        source_code=None,
     )
     mock_updater.ingestor.flush_all.assert_called_once()
 
