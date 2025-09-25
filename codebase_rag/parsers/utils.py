@@ -93,6 +93,7 @@ def ingest_method(
     language: str = "",
     extract_decorators_func: Any = None,
     method_qualified_name: str | None = None,
+    method_annotations: list[dict[str, Any]] | None = None,
 ) -> None:
     """Ingest a method node into the graph database.
 
@@ -107,6 +108,7 @@ def ingest_method(
         language: The programming language (used for C++ specific handling).
         extract_decorators_func: Optional function to extract decorators.
         method_qualified_name: Optional pre-computed qualified name to use instead of generating one.
+        method_annotations: Optional list of annotation metadata dictionaries extracted from the method.
     """
     # Extract method name based on language
     if language == "cpp":
@@ -137,11 +139,14 @@ def ingest_method(
     if extract_decorators_func:
         decorators = extract_decorators_func(method_node)
 
+    annotations = method_annotations if method_annotations is not None else []
+
     # Create method properties
     method_props: dict[str, Any] = {
         "qualified_name": method_qn,
         "name": method_name,
         "decorators": decorators,
+        "annotations": annotations,
         "start_line": method_node.start_point[0] + 1,
         "end_line": method_node.end_point[0] + 1,
         "docstring": get_docstring_func(method_node),

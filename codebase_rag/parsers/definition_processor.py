@@ -23,7 +23,7 @@ from .cpp_utils import (
     is_cpp_exported,
 )
 from .import_processor import ImportProcessor
-from .java_utils import extract_java_method_info
+from .java_utils import extract_java_class_info, extract_java_method_info
 from .lua_utils import extract_lua_assigned_name
 from .python_utils import resolve_class_name
 from .rust_utils import build_rust_module_path, extract_rust_impl_target
@@ -1070,11 +1070,18 @@ class DefinitionProcessor:
                 "qualified_name": class_qn,
                 "name": class_name,
                 "decorators": decorators,
+                "annotations": [],
+                "modifiers": [],
                 "start_line": class_node.start_point[0] + 1,
                 "end_line": class_node.end_point[0] + 1,
                 "docstring": self._get_docstring(class_node),
                 "is_exported": is_exported,
             }
+
+            if language == "java":
+                java_class_info = extract_java_class_info(class_node)
+                class_props["annotations"] = java_class_info.get("annotations", [])
+                class_props["modifiers"] = java_class_info.get("modifiers", [])
             # Determine the correct node type based on the AST node type
             if class_node.type == "interface_declaration":
                 node_type = "Interface"
@@ -1183,10 +1190,12 @@ class DefinitionProcessor:
 
                 # Handle Java method overloading with parameter types
                 method_qualified_name = None
+                method_annotations: list[dict[str, Any]] | None = None
                 if language == "java":
                     method_info = extract_java_method_info(method_node)
                     method_name = method_info.get("name")
                     parameters = method_info.get("parameters", [])
+                    method_annotations = method_info.get("annotations", [])
                     if method_name:
                         if parameters:
                             # Create method signature with parameter types for overloading
@@ -1209,6 +1218,7 @@ class DefinitionProcessor:
                     language,
                     self._extract_decorators,
                     method_qualified_name,
+                    method_annotations,
                 )
 
                 # Note: OVERRIDES relationships will be processed later after all methods are collected

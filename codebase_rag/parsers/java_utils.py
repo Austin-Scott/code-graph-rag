@@ -10,6 +10,13 @@ from .utils import safe_decode_text
 DELIMITER_TOKENS = ["(", ")", ","]
 
 
+class JavaAnnotationInfo(TypedDict):
+    """Type definition for Java annotation information."""
+
+    name: str | None
+    arguments: list[str]
+
+
 class JavaClassInfo(TypedDict):
     """Type definition for Java class information."""
 
@@ -19,6 +26,7 @@ class JavaClassInfo(TypedDict):
     interfaces: list[str]
     modifiers: list[str]
     type_parameters: list[str]
+    annotations: list[JavaAnnotationInfo]
 
 
 class JavaMethodInfo(TypedDict):
@@ -30,7 +38,7 @@ class JavaMethodInfo(TypedDict):
     parameters: list[str]
     modifiers: list[str]
     type_parameters: list[str]
-    annotations: list[str]
+    annotations: list[JavaAnnotationInfo]
 
 
 class JavaFieldInfo(TypedDict):
@@ -39,14 +47,7 @@ class JavaFieldInfo(TypedDict):
     name: str | None
     type: str | None
     modifiers: list[str]
-    annotations: list[str]
-
-
-class JavaAnnotationInfo(TypedDict):
-    """Type definition for Java annotation information."""
-
-    name: str | None
-    arguments: list[str]
+    annotations: list[JavaAnnotationInfo]
 
 
 def extract_java_package_name(package_node: Node) -> str | None:
@@ -140,6 +141,7 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
         - interfaces: List of implemented interface names
         - modifiers: List of access modifiers
         - type_parameters: List of generic type parameters
+        - annotations: List of annotation metadata dictionaries
     """
     if class_node.type not in [
         "class_declaration",
@@ -164,6 +166,7 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
         "interfaces": [],
         "modifiers": [],
         "type_parameters": [],
+        "annotations": [],
     }
 
     # Extract class name
@@ -211,7 +214,7 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
                 if param_name:
                     info["type_parameters"].append(param_name)
 
-    # Extract modifiers using correct tree-sitter traversal
+    # Extract modifiers and annotations using correct tree-sitter traversal
     for child in class_node.children:
         if child.type == "modifiers":
             # Look inside the modifiers node for actual modifier tokens
@@ -227,6 +230,10 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
                     modifier = safe_decode_text(modifier_child)
                     if modifier:
                         info["modifiers"].append(modifier)
+                elif modifier_child.type == "annotation":
+                    annotation_info = extract_java_annotation_info(modifier_child)
+                    if annotation_info.get("name"):
+                        info["annotations"].append(annotation_info)
 
     return info
 
@@ -245,7 +252,7 @@ def extract_java_method_info(method_node: Node) -> JavaMethodInfo:
         - parameters: List of parameter types
         - modifiers: List of access modifiers
         - type_parameters: List of generic type parameters
-        - annotations: List of annotations
+        - annotations: List of annotation metadata dictionaries
     """
     if method_node.type not in ["method_declaration", "constructor_declaration"]:
         return JavaMethodInfo(
@@ -319,9 +326,9 @@ def extract_java_method_info(method_node: Node) -> JavaMethodInfo:
                     if modifier:
                         info["modifiers"].append(modifier)
                 elif modifier_child.type == "annotation":
-                    annotation = safe_decode_text(modifier_child)
-                    if annotation:
-                        info["annotations"].append(annotation)
+                    annotation_info = extract_java_annotation_info(modifier_child)
+                    if annotation_info.get("name"):
+                        info["annotations"].append(annotation_info)
 
     return info
 
@@ -337,7 +344,7 @@ def extract_java_field_info(field_node: Node) -> JavaFieldInfo:
         - name: Field name
         - type: Field type
         - modifiers: List of access modifiers
-        - annotations: List of annotations
+        - annotations: List of annotation metadata dictionaries
     """
     if field_node.type != "field_declaration":
         return JavaFieldInfo(
@@ -384,9 +391,9 @@ def extract_java_field_info(field_node: Node) -> JavaFieldInfo:
                     if modifier:
                         info["modifiers"].append(modifier)
                 elif modifier_child.type == "annotation":
-                    annotation = safe_decode_text(modifier_child)
-                    if annotation:
-                        info["annotations"].append(annotation)
+                    annotation_info = extract_java_annotation_info(modifier_child)
+                    if annotation_info.get("name"):
+                        info["annotations"].append(annotation_info)
 
     return info
 
