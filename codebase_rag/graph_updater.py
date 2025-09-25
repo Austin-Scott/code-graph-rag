@@ -256,6 +256,77 @@ class GraphUpdater:
             ast_cache=self.ast_cache,
         )
 
+        # Preload existing definitions from previously processed projects so we can
+        # resolve cross-project relationships (e.g., when a project depends on
+        # classes/functions defined in another project that has already been
+        # ingested into the graph database).
+        self._preload_existing_definitions()
+
+    def _preload_existing_definitions(self) -> None:
+        """Populate the function registry with definitions that already exist."""
+
+        if not hasattr(self.ingestor, "fetch_all"):
+            return
+
+        allowed_labels = [
+            "Function",
+            "Method",
+            "Class",
+            "Interface",
+            "Struct",
+            "Trait",
+            "Enum",
+            "Type",
+            "Union",
+            "ModuleInterface",
+            "ModuleImplementation",
+        ]
+
+        try:
+            results = self.ingestor.fetch_all(
+                (
+                    "MATCH (n) "
+                    "WHERE exists(n.qualified_name) "
+                    "AND any(label IN labels(n) WHERE label IN $allowed_labels) "
+                    "RETURN n.qualified_name AS qualified_name, labels(n) AS labels"
+                ),
+                {"allowed_labels": allowed_labels},
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug(
+                "Skipping preload of existing definitions due to database error: {}",
+                exc,
+            )
+            return
+
+        if not isinstance(results, list):
+            return
+
+        for row in results:
+            if not isinstance(row, dict):
+                continue
+
+            qualified_name = row.get("qualified_name")
+            if not isinstance(qualified_name, str):
+                continue
+
+            # Avoid preloading entries for the current project to prevent stale
+            # definitions from previous runs from persisting in memory.
+            if qualified_name.startswith(f"{self.project_name}."):
+                continue
+
+            labels = row.get("labels") or []
+            node_type = next((label for label in labels if label in allowed_labels), None)
+            if not node_type:
+                continue
+
+            if qualified_name in self.function_registry:
+                continue
+
+            self.function_registry[qualified_name] = node_type
+            simple_name = qualified_name.split(".")[-1]
+            self.simple_name_lookup[simple_name].add(qualified_name)
+
     def _is_dependency_file(self, file_name: str, filepath: Path) -> bool:
         """Check if a file is a dependency file that should be processed for external dependencies."""
         dependency_files = {

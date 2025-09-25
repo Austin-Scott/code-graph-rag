@@ -26,7 +26,9 @@ def temp_repo() -> Generator[Path, None, None]:
 @pytest.fixture
 def mock_ingestor() -> MagicMock:
     """Provides a mocked MemgraphIngestor instance."""
-    return MagicMock(spec=MemgraphIngestor)
+    ingestor = MagicMock(spec=MemgraphIngestor)
+    ingestor.fetch_all.return_value = []
+    return ingestor
 
 
 @pytest.fixture

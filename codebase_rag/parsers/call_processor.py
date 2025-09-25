@@ -86,6 +86,16 @@ class CallProcessor:
         "Date.parse",
     }
 
+    _CLASS_NODE_TYPES = {
+        "Class",
+        "Interface",
+        "Struct",
+        "Trait",
+        "Enum",
+        "Type",
+        "Union",
+    }
+
     def __init__(
         self,
         ingestor: MemgraphIngestor,
@@ -504,11 +514,15 @@ class CallProcessor:
             # 1a.1. Direct import resolution
             if call_name in import_map:
                 imported_qn = import_map[call_name]
-                if imported_qn in self.function_registry:
+                resolved = self._resolve_registered_qualified_name(
+                    imported_qn, module_qn
+                )
+                if resolved:
+                    callee_type, callee_qn = resolved
                     logger.debug(
-                        f"Direct import resolved: {call_name} -> {imported_qn}"
+                        f"Direct import resolved: {call_name} -> {callee_qn}"
                     )
-                    return self.function_registry[imported_qn], imported_qn
+                    return callee_type, callee_qn
 
             # 1a.2. Handle qualified calls like "Class.method" and "self.attr.method"
             if "." in call_name:
@@ -531,15 +545,19 @@ class CallProcessor:
                             )
                             class_qn = class_qn_or_none if class_qn_or_none else ""
 
+                        class_qn = self._normalize_class_qn(class_qn, module_qn)
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
-                            if method_qn in self.function_registry:
+                            resolved_method = self._resolve_registered_qualified_name(
+                                method_qn, module_qn
+                            )
+                            if resolved_method:
                                 logger.debug(
                                     f"Type-inferred object method resolved: "
-                                    f"{call_name} -> {method_qn} "
+                                    f"{call_name} -> {resolved_method[1]} "
                                     f"(via {object_name}:{var_type})"
                                 )
-                                return self.function_registry[method_qn], method_qn
+                                return resolved_method
 
                             # Check inheritance for this method
                             inherited_method = self._resolve_inherited_method(
@@ -587,15 +605,19 @@ class CallProcessor:
                             )
                             class_qn = class_qn_or_none if class_qn_or_none else ""
 
+                        class_qn = self._normalize_class_qn(class_qn, module_qn)
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
-                            if method_qn in self.function_registry:
+                            resolved_method = self._resolve_registered_qualified_name(
+                                method_qn, module_qn
+                            )
+                            if resolved_method:
                                 logger.debug(
                                     f"Instance-resolved self-attribute call: "
-                                    f"{call_name} -> {method_qn} "
+                                    f"{call_name} -> {resolved_method[1]} "
                                     f"(via {attribute_ref}:{var_type})"
                                 )
-                                return self.function_registry[method_qn], method_qn
+                                return resolved_method
 
                             # Check inheritance for this method
                             inherited_method = self._resolve_inherited_method(
@@ -616,13 +638,17 @@ class CallProcessor:
                     # Check if the class is imported
                     if class_name in import_map:
                         class_qn = import_map[class_name]
+                        class_qn = self._normalize_class_qn(class_qn, module_qn)
                         method_qn = f"{class_qn}.{method_name}"
-                        if method_qn in self.function_registry:
+                        resolved_method = self._resolve_registered_qualified_name(
+                            method_qn, module_qn
+                        )
+                        if resolved_method:
                             logger.debug(
                                 f"Import-resolved qualified call: "
-                                f"{call_name} -> {method_qn}"
+                                f"{call_name} -> {resolved_method[1]}"
                             )
-                            return self.function_registry[method_qn], method_qn
+                            return resolved_method
 
                     # Then, check if the base is a local variable with known type
                     if local_var_types and class_name in local_var_types:
@@ -638,15 +664,19 @@ class CallProcessor:
                             )
                             class_qn = class_qn_or_none if class_qn_or_none else ""
 
+                        class_qn = self._normalize_class_qn(class_qn, module_qn)
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
-                            if method_qn in self.function_registry:
+                            resolved_method = self._resolve_registered_qualified_name(
+                                method_qn, module_qn
+                            )
+                            if resolved_method:
                                 logger.debug(
                                     f"Instance-resolved qualified call: "
-                                    f"{call_name} -> {method_qn} "
+                                    f"{call_name} -> {resolved_method[1]} "
                                     f"(via {class_name}:{var_type})"
                                 )
-                                return self.function_registry[method_qn], method_qn
+                                return resolved_method
 
                             # If method not found in the class, check inheritance chain
                             inherited_method = self._resolve_inherited_method(
@@ -677,11 +707,15 @@ class CallProcessor:
                         potential_qns.append(f"{imported_qn}::{call_name}")
 
                     for wildcard_qn in potential_qns:
-                        if wildcard_qn in self.function_registry:
+                        resolved_method = self._resolve_registered_qualified_name(
+                            wildcard_qn, module_qn
+                        )
+                        if resolved_method:
                             logger.debug(
-                                f"Wildcard-resolved call: {call_name} -> {wildcard_qn}"
+                                f"Wildcard-resolved call: "
+                                f"{call_name} -> {resolved_method[1]}"
                             )
-                            return self.function_registry[wildcard_qn], wildcard_qn
+                            return resolved_method
 
         # Phase 2: Heuristic-based resolution (less accurate but often effective)
         # 2a. Check for a function in the same module
@@ -868,15 +902,19 @@ class CallProcessor:
                 if resolved_class:
                     full_object_type = resolved_class
 
+            full_object_type = self._normalize_class_qn(full_object_type, module_qn)
             # Now resolve the final method call on that type
             method_qn = f"{full_object_type}.{final_method}"
 
-            if method_qn in self.function_registry:
+            resolved_method = self._resolve_registered_qualified_name(
+                method_qn, module_qn
+            )
+            if resolved_method:
                 logger.debug(
-                    f"Resolved chained call: {call_name} -> {method_qn} "
+                    f"Resolved chained call: {call_name} -> {resolved_method[1]} "
                     f"(via {object_expr}:{object_type})"
                 )
-                return self.function_registry[method_qn], method_qn
+                return resolved_method
 
             # Also check inheritance for the final method
             inherited_method = self._resolve_inherited_method(
@@ -890,6 +928,53 @@ class CallProcessor:
                 return inherited_method
 
         return None
+
+    def _resolve_registered_qualified_name(
+        self, imported_qn: str, module_qn: str
+    ) -> tuple[str, str] | None:
+        """Resolve a qualified name using the known registry (with suffix matching)."""
+
+        if not imported_qn:
+            return None
+
+        if imported_qn in self.function_registry:
+            return self.function_registry[imported_qn], imported_qn
+
+        candidates = set(self.function_registry.find_ending_with(imported_qn))
+
+        if "::" in imported_qn:
+            dot_variant = imported_qn.replace("::", ".")
+            candidates.update(self.function_registry.find_ending_with(dot_variant))
+
+        if "." in imported_qn:
+            colon_variant = imported_qn.replace(".", "::")
+            candidates.update(self.function_registry.find_ending_with(colon_variant))
+
+        if not candidates:
+            return None
+
+        sorted_candidates = sorted(
+            candidates,
+            key=lambda qn: (
+                0 if qn.startswith(self.project_name) else 1,
+                self._calculate_import_distance(qn, module_qn),
+                len(qn),
+            ),
+        )
+
+        best_qn = sorted_candidates[0]
+        return self.function_registry[best_qn], best_qn
+
+    def _normalize_class_qn(self, class_qn: str | None, module_qn: str) -> str:
+        """Normalize class qualified names using the registry for cross-project lookups."""
+
+        if not class_qn:
+            return ""
+
+        resolved = self._resolve_registered_qualified_name(class_qn, module_qn)
+        if resolved and resolved[0] in self._CLASS_NODE_TYPES:
+            return resolved[1]
+        return class_qn
 
     def _resolve_super_call(
         self, call_name: str, module_qn: str, class_context: str | None = None
