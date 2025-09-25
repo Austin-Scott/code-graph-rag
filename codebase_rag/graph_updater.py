@@ -287,7 +287,7 @@ class GraphUpdater:
             results = self.ingestor.fetch_all(
                 (
                     "MATCH (n) "
-                    "WHERE exists(n.qualified_name) "
+                    "WHERE n.qualified_name IS NOT NULL "
                     "AND any(label IN labels(n) WHERE label IN $allowed_labels) "
                     "RETURN n.qualified_name AS qualified_name, labels(n) AS labels"
                 ),
