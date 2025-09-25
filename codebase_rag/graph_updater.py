@@ -5,6 +5,7 @@ This is the new modular version that maintains all functionality while
 splitting the monolithic class into logical components.
 """
 
+import re
 import sys
 from collections import OrderedDict, defaultdict
 from collections.abc import ItemsView, KeysView
@@ -370,6 +371,33 @@ class GraphUpdater:
         # Use pathlib.rglob for more efficient file iteration
         for filepath in self.repo_path.rglob("*"):
             if filepath.is_file() and not should_skip_path(filepath):
+                if filepath.suffix == ".vue":
+                    vue_script = self._extract_vue_script_content(filepath)
+                    if vue_script:
+                        script_language, script_source = vue_script
+                        if script_language in self.parsers:
+                            result = self.factory.definition_processor.process_file(
+                                filepath,
+                                script_language,
+                                self.queries,
+                                self.factory.structure_processor.structural_elements,
+                                source_code=script_source,
+                            )
+                            if result:
+                                root_node, language = result
+                                self.ast_cache[filepath] = (root_node, language)
+                        else:
+                            logger.warning(
+                                f"Unsupported Vue script language '{script_language}' for {filepath}"
+                            )
+                    else:
+                        logger.debug(f"No <script> tag found in Vue component: {filepath}")
+
+                    self.factory.structure_processor.process_generic_file(
+                        filepath, filepath.name
+                    )
+                    continue
+
                 # Check if this file type is supported for parsing
                 lang_config = get_language_config(filepath.suffix)
                 if lang_config and lang_config.name in self.parsers:
@@ -379,6 +407,7 @@ class GraphUpdater:
                         lang_config.name,
                         self.queries,
                         self.factory.structure_processor.structural_elements,
+                        source_code=None,
                     )
                     if result:
                         root_node, language = result
@@ -409,3 +438,81 @@ class GraphUpdater:
             self.factory.call_processor.process_calls_in_file(
                 file_path, root_node, language, self.queries
             )
+
+    @staticmethod
+    def _extract_vue_script_content(file_path: Path) -> tuple[str, bytes] | None:
+        """Extract concatenated <script> contents and determine language for Vue SFCs."""
+
+        try:
+            file_text = file_path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:
+            logger.warning(f"Failed to decode Vue component as UTF-8: {file_path}")
+            return None
+
+        script_pattern = re.compile(
+            r"<script(?P<attrs>[^>]*)>(?P<content>.*?)</script>",
+            re.IGNORECASE | re.DOTALL,
+        )
+
+        script_blocks: list[str] = []
+        contains_typescript = False
+
+        for match in script_pattern.finditer(file_text):
+            attrs = match.group("attrs") or ""
+            content = match.group("content") or ""
+
+            if not content.strip():
+                continue
+
+            language = GraphUpdater._determine_vue_script_language(attrs)
+            if language == "typescript":
+                contains_typescript = True
+
+            script_blocks.append(content)
+
+        if not script_blocks:
+            return None
+
+        chosen_language = "typescript" if contains_typescript else "javascript"
+        combined_source = "\n\n".join(script_blocks)
+        return chosen_language, combined_source.encode("utf-8")
+
+    @staticmethod
+    def _determine_vue_script_language(script_attrs: str) -> str:
+        """Determine script language (javascript/typescript) from Vue script attributes."""
+
+        attr_text = script_attrs or ""
+
+        lang_match = re.search(
+            r"lang\s*=\s*['\"](?P<lang>[^'\"]+)['\"]",
+            attr_text,
+            flags=re.IGNORECASE,
+        )
+
+        if not lang_match:
+            lang_match = re.search(
+                r"lang\s*=\s*(?P<lang>[\w/+-]+)",
+                attr_text,
+                flags=re.IGNORECASE,
+            )
+
+        type_match = re.search(
+            r"type\s*=\s*['\"](?P<type>[^'\"]+)['\"]",
+            attr_text,
+            flags=re.IGNORECASE,
+        )
+
+        candidates = []
+        if lang_match:
+            candidates.append(lang_match.group("lang"))
+        if type_match:
+            candidates.append(type_match.group("type"))
+
+        for candidate in candidates:
+            value = candidate.lower()
+            if value in {"ts", "tsx", "typescript", "text/ts", "text/typescript"}:
+                return "typescript"
+            if value in {"js", "jsx", "javascript", "text/javascript"}:
+                return "javascript"
+
+        return "javascript"

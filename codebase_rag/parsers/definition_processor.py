@@ -83,6 +83,8 @@ class DefinitionProcessor:
         language: str,
         queries: dict[str, Any],
         structural_elements: dict[Path, str | None],
+        *,
+        source_code: bytes | None = None,
     ) -> tuple[Node, str] | None:
         """
         Parses a file, ingests its structure and definitions,
@@ -100,7 +102,7 @@ class DefinitionProcessor:
                 logger.warning(f"Unsupported language '{language}' for {file_path}")
                 return None
 
-            source_bytes = file_path.read_bytes()
+            source_bytes = source_code if source_code is not None else file_path.read_bytes()
             # We need access to parsers, but we'll get it through queries
             lang_queries = queries[language]
             parser = lang_queries.get("parser")
