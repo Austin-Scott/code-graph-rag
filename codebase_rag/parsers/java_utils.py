@@ -19,6 +19,7 @@ class JavaClassInfo(TypedDict):
     interfaces: list[str]
     modifiers: list[str]
     type_parameters: list[str]
+    annotations: list[str]
 
 
 class JavaMethodInfo(TypedDict):
@@ -164,6 +165,7 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
         "interfaces": [],
         "modifiers": [],
         "type_parameters": [],
+        "annotations": [],
     }
 
     # Extract class name
@@ -211,7 +213,7 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
                 if param_name:
                     info["type_parameters"].append(param_name)
 
-    # Extract modifiers using correct tree-sitter traversal
+    # Extract modifiers and annotations using correct tree-sitter traversal
     for child in class_node.children:
         if child.type == "modifiers":
             # Look inside the modifiers node for actual modifier tokens
@@ -227,6 +229,10 @@ def extract_java_class_info(class_node: Node) -> JavaClassInfo:
                     modifier = safe_decode_text(modifier_child)
                     if modifier:
                         info["modifiers"].append(modifier)
+                elif modifier_child.type == "annotation":
+                    annotation = safe_decode_text(modifier_child)
+                    if annotation:
+                        info["annotations"].append(annotation)
 
     return info
 

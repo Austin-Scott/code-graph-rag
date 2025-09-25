@@ -93,6 +93,7 @@ def ingest_method(
     language: str = "",
     extract_decorators_func: Any = None,
     method_qualified_name: str | None = None,
+    method_annotations: list[str] | None = None,
 ) -> None:
     """Ingest a method node into the graph database.
 
@@ -137,11 +138,14 @@ def ingest_method(
     if extract_decorators_func:
         decorators = extract_decorators_func(method_node)
 
+    annotations = method_annotations if method_annotations is not None else []
+
     # Create method properties
     method_props: dict[str, Any] = {
         "qualified_name": method_qn,
         "name": method_name,
         "decorators": decorators,
+        "annotations": annotations,
         "start_line": method_node.start_point[0] + 1,
         "end_line": method_node.end_point[0] + 1,
         "docstring": get_docstring_func(method_node),
