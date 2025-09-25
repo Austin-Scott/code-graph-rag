@@ -1188,7 +1188,7 @@ class DefinitionProcessor:
 
                 # Handle Java method overloading with parameter types
                 method_qualified_name = None
-                method_annotations: list[str] | None = None
+                method_annotations: list[dict[str, Any]] | None = None
                 if language == "java":
                     method_info = extract_java_method_info(method_node)
                     method_name = method_info.get("name")
