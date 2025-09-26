@@ -375,6 +375,8 @@ class CallProcessor:
             if not call_name:
                 continue
 
+            unresolved_candidates: list[str] = []
+
             # Use Java-specific resolution for Java method calls
             if language == "java" and call_node.type == "method_invocation":
                 callee_info = self._resolve_java_method_call(
@@ -382,7 +384,11 @@ class CallProcessor:
                 )
             else:
                 callee_info = self._resolve_function_call(
-                    call_name, module_qn, local_var_types, class_context
+                    call_name,
+                    module_qn,
+                    local_var_types,
+                    class_context,
+                    unresolved_candidates,
                 )
             if not callee_info:
                 # Check if it's a built-in JavaScript method
@@ -393,6 +399,13 @@ class CallProcessor:
                         call_name, module_qn
                     )
                     if not operator_info:
+                        self._record_pending_call(
+                            caller_type,
+                            caller_qn,
+                            module_qn,
+                            call_name,
+                            unresolved_candidates,
+                        )
                         continue
                     callee_type, callee_qn = operator_info
                 else:
@@ -457,8 +470,13 @@ class CallProcessor:
             # Then process this call itself
             call_name = self._get_call_target_name(node)
             if call_name:
+                unresolved_candidates: list[str] = []
                 callee_info = self._resolve_function_call(
-                    call_name, module_qn, local_var_types, class_context
+                    call_name,
+                    module_qn,
+                    local_var_types,
+                    class_context,
+                    unresolved_candidates,
                 )
                 if callee_info:
                     callee_type, callee_qn = callee_info
@@ -470,6 +488,14 @@ class CallProcessor:
                         (caller_type, "qualified_name", caller_qn),
                         "CALLS",
                         (callee_type, "qualified_name", callee_qn),
+                    )
+                else:
+                    self._record_pending_call(
+                        caller_type,
+                        caller_qn,
+                        module_qn,
+                        call_name,
+                        unresolved_candidates,
                     )
 
         # Recursively search in all child nodes
@@ -484,8 +510,22 @@ class CallProcessor:
         module_qn: str,
         local_var_types: dict[str, str] | None = None,
         class_context: str | None = None,
+        unresolved_candidates: list[str] | None = None,
     ) -> tuple[str, str] | None:
         """Resolve a function call to its qualified name and type."""
+
+        def register_candidate(name: str) -> None:
+            if unresolved_candidates is None:
+                return
+            if not name:
+                return
+            if name not in unresolved_candidates:
+                unresolved_candidates.append(name)
+            if "(" not in name and not name.endswith(")"):
+                variant = f"{name}()"
+                if variant not in unresolved_candidates:
+                    unresolved_candidates.append(variant)
+
         # Phase -1: Handle IIFE calls specially
         if call_name and (
             call_name.startswith("iife_func_") or call_name.startswith("iife_arrow_")
@@ -514,6 +554,7 @@ class CallProcessor:
             # 1a.1. Direct import resolution
             if call_name in import_map:
                 imported_qn = import_map[call_name]
+                register_candidate(imported_qn)
                 resolved = self._resolve_registered_qualified_name(
                     imported_qn, module_qn
                 )
@@ -548,6 +589,7 @@ class CallProcessor:
                         class_qn = self._normalize_class_qn(class_qn, module_qn)
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
+                            register_candidate(method_qn)
                             resolved_method = self._resolve_registered_qualified_name(
                                 method_qn, module_qn
                             )
@@ -581,6 +623,7 @@ class CallProcessor:
 
                     # Fallback: Try to find the method in the same module
                     method_qn = f"{module_qn}.{method_name}"
+                    register_candidate(method_qn)
                     if method_qn in self.function_registry:
                         logger.debug(
                             f"Object method resolved: {call_name} -> {method_qn}"
@@ -608,6 +651,7 @@ class CallProcessor:
                         class_qn = self._normalize_class_qn(class_qn, module_qn)
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
+                            register_candidate(method_qn)
                             resolved_method = self._resolve_registered_qualified_name(
                                 method_qn, module_qn
                             )
@@ -640,6 +684,7 @@ class CallProcessor:
                         class_qn = import_map[class_name]
                         class_qn = self._normalize_class_qn(class_qn, module_qn)
                         method_qn = f"{class_qn}.{method_name}"
+                        register_candidate(method_qn)
                         resolved_method = self._resolve_registered_qualified_name(
                             method_qn, module_qn
                         )
@@ -667,6 +712,7 @@ class CallProcessor:
                         class_qn = self._normalize_class_qn(class_qn, module_qn)
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
+                            register_candidate(method_qn)
                             resolved_method = self._resolve_registered_qualified_name(
                                 method_qn, module_qn
                             )
@@ -707,6 +753,7 @@ class CallProcessor:
                         potential_qns.append(f"{imported_qn}::{call_name}")
 
                     for wildcard_qn in potential_qns:
+                        register_candidate(wildcard_qn)
                         resolved_method = self._resolve_registered_qualified_name(
                             wildcard_qn, module_qn
                         )
@@ -720,6 +767,7 @@ class CallProcessor:
         # Phase 2: Heuristic-based resolution (less accurate but often effective)
         # 2a. Check for a function in the same module
         same_module_func_qn = f"{module_qn}.{call_name}"
+        register_candidate(same_module_func_qn)
         if same_module_func_qn in self.function_registry:
             logger.debug(
                 f"Same-module resolution: {call_name} -> {same_module_func_qn}"
@@ -737,6 +785,8 @@ class CallProcessor:
             possible_matches.sort(
                 key=lambda qn: self._calculate_import_distance(qn, module_qn)
             )
+            for candidate in possible_matches:
+                register_candidate(candidate)
             # Take the most likely candidate.
             best_candidate_qn = possible_matches[0]
             logger.debug(
@@ -748,7 +798,47 @@ class CallProcessor:
             )
 
         logger.debug(f"Could not resolve call: {call_name}")
+        register_candidate(call_name)
         return None
+
+    def _record_pending_call(
+        self,
+        caller_type: str,
+        caller_qn: str,
+        module_qn: str,
+        call_name: str,
+        candidates: list[str],
+    ) -> None:
+        """Persist unresolved calls for future resolution."""
+
+        if not hasattr(self.ingestor, "record_pending_call"):
+            return
+
+        normalized_candidates: list[str] = []
+        seen: set[str] = set()
+
+        for candidate in candidates + [call_name]:
+            if not candidate:
+                continue
+            if candidate not in seen:
+                normalized_candidates.append(candidate)
+                seen.add(candidate)
+            if "(" not in candidate and not candidate.endswith(")"):
+                variant = f"{candidate}()"
+                if variant not in seen:
+                    normalized_candidates.append(variant)
+                    seen.add(variant)
+
+        payload = {
+            "caller_type": caller_type,
+            "caller_qn": caller_qn,
+            "module_qn": module_qn,
+            "call_name": call_name,
+            "project_name": self.project_name,
+            "candidates": normalized_candidates,
+        }
+
+        self.ingestor.record_pending_call(payload)
 
     def _resolve_builtin_call(self, call_name: str) -> tuple[str, str] | None:
         """Resolve built-in JavaScript method calls that don't exist in user code."""

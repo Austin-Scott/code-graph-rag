@@ -20,6 +20,8 @@ class MemgraphIngestor:
         self.conn: Any | None = None
         self.node_buffer: list[tuple[str, dict[str, Any]]] = []
         self.relationship_buffer: list[tuple[tuple, str, tuple, dict | None]] = []
+        self._pending_calls: list[dict[str, Any]] = []
+        self._pending_call_keys: set[tuple[Any, ...]] = set()
         self.unique_constraints = {
             "Project": "name",
             "Package": "qualified_name",
@@ -202,6 +204,44 @@ class MemgraphIngestor:
         """Executes a write query without returning results."""
         logger.debug(f"Executing write query: {query} with params: {params}")
         self._execute_query(query, params)
+
+    # ------------------------------------------------------------------
+    # Pending call helpers
+    # ------------------------------------------------------------------
+
+    def record_pending_call(self, pending: dict[str, Any]) -> None:
+        """Store an unresolved call so it can be retried later."""
+
+        key = (
+            pending.get("caller_type"),
+            pending.get("caller_qn"),
+            pending.get("call_name"),
+            tuple(sorted(pending.get("candidates", []))),
+        )
+        if key in self._pending_call_keys:
+            return
+
+        self._pending_calls.append(pending)
+        self._pending_call_keys.add(key)
+
+    def get_pending_calls(self) -> list[dict[str, Any]]:
+        """Return a copy of all unresolved calls."""
+
+        return list(self._pending_calls)
+
+    def replace_pending_calls(self, pending_calls: list[dict[str, Any]]) -> None:
+        """Replace the list of unresolved calls with a new set."""
+
+        self._pending_calls = list(pending_calls)
+        self._pending_call_keys = {
+            (
+                item.get("caller_type"),
+                item.get("caller_qn"),
+                item.get("call_name"),
+                tuple(sorted(item.get("candidates", []))),
+            )
+            for item in self._pending_calls
+        }
 
     def export_graph_to_dict(self) -> dict[str, Any]:
         """Export the entire graph as a dictionary with nodes and relationships."""
