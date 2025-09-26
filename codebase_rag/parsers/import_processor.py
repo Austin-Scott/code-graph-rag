@@ -256,37 +256,48 @@ class ImportProcessor:
 
             # Create IMPORTS relationships for each parsed import
             if self.ingestor and module_qn in self.import_mapping:
-                created_relationships: list[tuple[str, str]] = []
+                # Aggregate imports by their resolved module path so we only create
+                # a single relationship per module. This avoids redundant
+                # ensure_relationship_batch calls when multiple entities are imported
+                # from the same module (e.g. ``from foo import A, B``).
+                relationships_by_module: dict[str, set[str]] = {}
 
-                for local_name, full_name in self.import_mapping[module_qn].items():
+                for _, full_name in self.import_mapping[module_qn].items():
                     # Extract just the module path for the IMPORTS relationship
                     # This ensures Module -> Module relationships, not Module -> Class/Function
                     module_path = self._extract_module_path(full_name, language)
 
+                    if module_path not in relationships_by_module:
+                        relationships_by_module[module_path] = set()
+                    relationships_by_module[module_path].add(full_name)
+
+                for module_path in relationships_by_module:
                     self.ingestor.ensure_relationship_batch(
                         ("Module", "qualified_name", module_qn),
                         "IMPORTS",
                         ("Module", "qualified_name", module_path),
                     )
-                    created_relationships.append((module_path, full_name))
 
-                if created_relationships:
+                if relationships_by_module:
                     preview_limit = 5
 
                     def _format_relationship_preview() -> str:
-                        preview_parts = [
-                            f"{module_qn} -> {module_path} (from {full_name})"
-                            for module_path, full_name in created_relationships[:preview_limit]
-                        ]
-                        if len(created_relationships) > preview_limit:
-                            preview_parts.append(
-                                f"... (+{len(created_relationships) - preview_limit} more)"
+                        preview_items: list[str] = []
+                        for module_path, full_names in list(relationships_by_module.items())[
+                            :preview_limit
+                        ]:
+                            sample_name = next(iter(full_names))
+                            preview_items.append(
+                                f"{module_qn} -> {module_path} (from {sample_name})"
                             )
-                        return ", ".join(preview_parts)
+                        remaining = len(relationships_by_module) - preview_limit
+                        if remaining > 0:
+                            preview_items.append(f"... (+{remaining} more)")
+                        return ", ".join(preview_items)
 
                     logger.opt(lazy=True).debug(
-                        "Created {} IMPORTS relationships for {}: {}",
-                        len(created_relationships),
+                        "Created {} unique IMPORTS relationships for {}: {}",
+                        len(relationships_by_module),
                         module_qn,
                         _format_relationship_preview,
                     )
