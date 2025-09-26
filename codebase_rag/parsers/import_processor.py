@@ -628,50 +628,55 @@ class ImportProcessor:
         """Parse Java import statements."""
 
         for import_node in captures.get("import", []):
-            if import_node.type == "import_declaration":
-                is_static = False
-                imported_path = None
-                is_wildcard = False
+            if import_node.type != "import_declaration":
+                continue
 
-                # Parse import declaration
-                for child in import_node.children:
-                    if child.type == "static":
-                        is_static = True
-                    elif child.type == "scoped_identifier":
-                        imported_path = safe_decode_with_fallback(child)
-                    elif child.type == "asterisk":
-                        is_wildcard = True
+            # Decode the entire import declaration once for improved performance
+            import_statement = safe_decode_text(import_node)
+            if not import_statement:
+                continue
 
-                if not imported_path:
-                    continue
+            import_statement = import_statement.strip()
+            if not import_statement.startswith("import"):
+                continue
 
-                if is_wildcard:
-                    # import java.util.*; - wildcard import
-                    logger.debug(f"Java wildcard import: {imported_path}.*")
-                    # Store wildcard import for potential future use
-                    self.import_mapping[module_qn][f"*{imported_path}"] = imported_path
-                else:
-                    # import java.util.List; or import static java.lang.Math.PI;
-                    parts = imported_path.split(".")
-                    if parts:
-                        imported_name = parts[-1]  # Last part is class/method name
-                        if is_static:
-                            # Static import - method/field can be used directly
-                            self.import_mapping[module_qn][imported_name] = (
-                                imported_path
-                            )
-                            logger.debug(
-                                f"Java static import: {imported_name} -> "
-                                f"{imported_path}"
-                            )
-                        else:
-                            # Regular class import
-                            self.import_mapping[module_qn][imported_name] = (
-                                imported_path
-                            )
-                            logger.debug(
-                                f"Java import: {imported_name} -> {imported_path}"
-                            )
+            remainder = import_statement[len("import") :].strip()
+            is_static = False
+            if remainder.startswith("static"):
+                is_static = True
+                remainder = remainder[len("static") :].strip()
+
+            if remainder.endswith(";"):
+                remainder = remainder[:-1].strip()
+
+            if not remainder:
+                continue
+
+            is_wildcard = remainder.endswith(".*")
+            imported_path = remainder[:-2] if is_wildcard else remainder
+
+            if not imported_path:
+                continue
+
+            if is_wildcard:
+                logger.debug(f"Java wildcard import: {imported_path}.*")
+                self.import_mapping[module_qn][f"*{imported_path}"] = imported_path
+                continue
+
+            # Extract the imported name (class/method/field) efficiently
+            if "." in imported_path:
+                imported_name = imported_path.rsplit(".", 1)[1]
+            else:
+                imported_name = imported_path
+
+            self.import_mapping[module_qn][imported_name] = imported_path
+
+            if is_static:
+                logger.debug(
+                    f"Java static import: {imported_name} -> {imported_path}"
+                )
+            else:
+                logger.debug(f"Java import: {imported_name} -> {imported_path}")
 
     def _parse_rust_imports(self, captures: dict, module_qn: str) -> None:
         """Parse Rust use declarations."""
