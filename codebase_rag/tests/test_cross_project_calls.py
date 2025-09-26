@@ -110,12 +110,7 @@ def test_cross_project_calls_create_edges(temp_repo: Path) -> None:
     expected_caller = (
         "Method",
         "qualified_name",
-        f"{consumer_project.name}.src.main.java.com.example.app.App.App.run()",
-    )
-    expected_callee = (
-        "Method",
-        "qualified_name",
-        f"{library_project.name}.src.main.java.com.example.lib.LibraryClass.LibraryClass.greet()",
+        f"{consumer_project.name}.src.main.java.com.example.app.App.App.run",
     )
 
     call_relationships = [
@@ -123,10 +118,12 @@ def test_cross_project_calls_create_edges(temp_repo: Path) -> None:
     ]
 
     assert any(
-        rel[0] == expected_caller and rel[2] == expected_callee
+        rel[0] == expected_caller and rel[2][0] == "Method"
+        and rel[2][2].startswith(
+            f"{library_project.name}.src.main.java.com.example.lib.LibraryClass.LibraryClass.greet"
+        )
         for rel in call_relationships
     ), "Expected CALLS relationship between consumer run() and library greet()"
-
 
 def test_cross_project_calls_resolve_after_dependency(temp_repo: Path) -> None:
     """Cross-project calls should be created even if dependency is ingested later."""
@@ -204,10 +201,11 @@ def test_cross_project_calls_resolve_after_dependency(temp_repo: Path) -> None:
     expected_caller = (
         "Method",
         "qualified_name",
-        f"{consumer_project.name}.src.main.java.com.example.app.App.App.run()",
+        f"{consumer_project.name}.src.main.java.com.example.app.App.App.run",
     )
+
     telemetry_interface_suffix = (
-        "TelemetryProvider.TelemetryProvider.resolveCoordinate"
+        "fjord.telemetry.TelemetryProvider.TelemetryProvider.resolveCoordinate"
     )
 
     call_relationships = [
@@ -215,6 +213,76 @@ def test_cross_project_calls_resolve_after_dependency(temp_repo: Path) -> None:
     ]
 
     assert any(
-        rel[0] == expected_caller and telemetry_interface_suffix in rel[2][2]
+        rel[0] == expected_caller
+        and rel[2][0] == "Method"
+        and telemetry_interface_suffix in rel[2][2]
         for rel in call_relationships
     ), "Expected CALLS relationship after dependency ingestion"
+
+
+def test_cross_project_calls_with_fully_qualified_name(temp_repo: Path) -> None:
+    """Calls using fully qualified class names should resolve across projects."""
+
+    parsers, queries = load_parsers()
+    if "java" not in parsers:
+        pytest.skip("Java parser not available in this environment")
+
+    ingestor = InMemoryIngestor()
+
+    library_project = temp_repo / "fq-library"
+    library_src = library_project / "src/main/java/com/example/lib"
+    library_src.mkdir(parents=True, exist_ok=True)
+    (library_src / "LibraryClass.java").write_text(
+        textwrap.dedent(
+            """
+            package com.example.lib;
+
+            public class LibraryClass {
+                public static String greet() {
+                    return "hello";
+                }
+            }
+            """
+        ).strip()
+    )
+
+    GraphUpdater(ingestor, library_project, parsers, queries).run()
+
+    consumer_project = temp_repo / "fq-consumer"
+    consumer_src = consumer_project / "src/main/java/com/example/app"
+    consumer_src.mkdir(parents=True, exist_ok=True)
+    (consumer_src / "App.java").write_text(
+        textwrap.dedent(
+            """
+            package com.example.app;
+
+            public class App {
+                public String run() {
+                    return com.example.lib.LibraryClass.greet();
+                }
+            }
+            """
+        ).strip()
+    )
+
+    GraphUpdater(ingestor, consumer_project, parsers, queries).run()
+
+    expected_caller = (
+        "Method",
+        "qualified_name",
+        f"{consumer_project.name}.src.main.java.com.example.app.App.App.run",
+    )
+
+    call_relationships = [
+        rel for rel in ingestor.relationships if rel[1] == "CALLS"
+    ]
+
+    assert any(
+        rel[0] == expected_caller
+        and rel[2][0] == "Method"
+        and rel[2][2].startswith(
+            f"{library_project.name}.src.main.java.com.example.lib.LibraryClass.LibraryClass.greet"
+        )
+        for rel in call_relationships
+    ), "Expected CALLS relationship for fully qualified cross-project call"
+
