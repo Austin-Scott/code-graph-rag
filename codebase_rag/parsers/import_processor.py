@@ -306,11 +306,12 @@ class ImportProcessor:
                                     preview_items.append(f"... (+{remaining} more)")
                                 return ", ".join(preview_items)
 
-                            logger.opt(lazy=True).debug(
+                            preview = _format_relationship_preview()
+                            logger.debug(
                                 "Created {} unique IMPORTS relationships for {}: {}",
                                 len(relationships_by_module),
                                 module_qn,
-                                _format_relationship_preview,
+                                preview,
                             )
                         except Exception as rel_error:
                             logger.warning(
