@@ -271,36 +271,54 @@ class ImportProcessor:
                         relationships_by_module[module_path] = set()
                     relationships_by_module[module_path].add(full_name)
 
-                for module_path in relationships_by_module:
-                    self.ingestor.ensure_relationship_batch(
-                        ("Module", "qualified_name", module_qn),
-                        "IMPORTS",
-                        ("Module", "qualified_name", module_path),
-                    )
-
                 if relationships_by_module:
-                    preview_limit = 5
-
-                    def _format_relationship_preview() -> str:
-                        preview_items: list[str] = []
-                        for module_path, full_names in list(relationships_by_module.items())[
-                            :preview_limit
-                        ]:
-                            sample_name = next(iter(full_names))
-                            preview_items.append(
-                                f"{module_qn} -> {module_path} (from {sample_name})"
-                            )
-                        remaining = len(relationships_by_module) - preview_limit
-                        if remaining > 0:
-                            preview_items.append(f"... (+{remaining} more)")
-                        return ", ".join(preview_items)
-
-                    logger.opt(lazy=True).debug(
-                        "Created {} unique IMPORTS relationships for {}: {}",
-                        len(relationships_by_module),
-                        module_qn,
-                        _format_relationship_preview,
+                    ensure_relationship = getattr(
+                        self.ingestor, "ensure_relationship_batch", None
                     )
+
+                    if not callable(ensure_relationship):
+                        logger.warning(
+                            "Skipping IMPORTS relationship creation for {} because "
+                            "ingestor.ensure_relationship_batch is not callable (type: {}).",
+                            module_qn,
+                            type(ensure_relationship).__name__,
+                        )
+                    else:
+                        try:
+                            for module_path in relationships_by_module:
+                                ensure_relationship(
+                                    ("Module", "qualified_name", module_qn),
+                                    "IMPORTS",
+                                    ("Module", "qualified_name", module_path),
+                                )
+
+                            preview_limit = 5
+
+                            def _format_relationship_preview() -> str:
+                                preview_items: list[str] = []
+                                for module_path, full_names in list(relationships_by_module.items())[:preview_limit]:
+                                    sample_name = next(iter(full_names))
+                                    preview_items.append(
+                                        f"{module_qn} -> {module_path} (from {sample_name})"
+                                    )
+                                remaining = len(relationships_by_module) - preview_limit
+                                if remaining > 0:
+                                    preview_items.append(f"... (+{remaining} more)")
+                                return ", ".join(preview_items)
+
+                            logger.opt(lazy=True).debug(
+                                "Created {} unique IMPORTS relationships for {}: {}",
+                                len(relationships_by_module),
+                                module_qn,
+                                _format_relationship_preview,
+                            )
+                        except Exception as rel_error:
+                            logger.warning(
+                                "Failed to create IMPORTS relationships for {}: {}",
+                                module_qn,
+                                rel_error,
+                            )
+
 
         except Exception as e:
             logger.warning(f"Failed to parse imports in {module_qn}: {e}")
