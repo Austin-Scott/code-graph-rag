@@ -256,6 +256,8 @@ class ImportProcessor:
 
             # Create IMPORTS relationships for each parsed import
             if self.ingestor and module_qn in self.import_mapping:
+                created_relationships: list[tuple[str, str]] = []
+
                 for local_name, full_name in self.import_mapping[module_qn].items():
                     # Extract just the module path for the IMPORTS relationship
                     # This ensures Module -> Module relationships, not Module -> Class/Function
@@ -266,8 +268,27 @@ class ImportProcessor:
                         "IMPORTS",
                         ("Module", "qualified_name", module_path),
                     )
-                    logger.debug(
-                        f"  Created IMPORTS relationship: {module_qn} -> {module_path} (from {full_name})"
+                    created_relationships.append((module_path, full_name))
+
+                if created_relationships:
+                    preview_limit = 5
+
+                    def _format_relationship_preview() -> str:
+                        preview_parts = [
+                            f"{module_qn} -> {module_path} (from {full_name})"
+                            for module_path, full_name in created_relationships[:preview_limit]
+                        ]
+                        if len(created_relationships) > preview_limit:
+                            preview_parts.append(
+                                f"... (+{len(created_relationships) - preview_limit} more)"
+                            )
+                        return ", ".join(preview_parts)
+
+                    logger.opt(lazy=True).debug(
+                        "Created {} IMPORTS relationships for {}: {}",
+                        len(created_relationships),
+                        module_qn,
+                        _format_relationship_preview,
                     )
 
         except Exception as e:
