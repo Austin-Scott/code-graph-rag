@@ -380,6 +380,7 @@ class GraphUpdater:
         )
         logger.info("--- Pass 3: Processing Function Calls from AST Cache ---")
         self._process_function_calls()
+        self._resolve_pending_calls()
 
         # Process method overrides after all definitions are collected
         self.factory.definition_processor.process_all_method_overrides()
@@ -509,6 +510,49 @@ class GraphUpdater:
             self.factory.call_processor.process_calls_in_file(
                 file_path, root_node, language, self.queries
             )
+
+    def _resolve_pending_calls(self) -> None:
+        """Attempt to resolve any previously stored unresolved calls."""
+
+        if not hasattr(self.ingestor, "get_pending_calls"):
+            return
+
+        pending_calls = self.ingestor.get_pending_calls()
+        if not pending_calls:
+            return
+
+        logger.debug(f"Attempting to resolve {len(pending_calls)} pending calls")
+        remaining: list[dict[str, Any]] = []
+        call_processor = self.factory.call_processor
+
+        for pending in pending_calls:
+            candidates = pending.get("candidates") or []
+            module_qn = pending.get("module_qn", "")
+            resolved: tuple[str, str] | None = None
+
+            for candidate in candidates:
+                resolved = call_processor._resolve_registered_qualified_name(
+                    candidate, module_qn
+                )
+                if resolved:
+                    break
+
+            if not resolved and pending.get("call_name"):
+                resolved = call_processor._resolve_registered_qualified_name(
+                    pending["call_name"], module_qn
+                )
+
+            if resolved:
+                callee_type, callee_qn = resolved
+                self.ingestor.ensure_relationship_batch(
+                    (pending.get("caller_type", "Function"), "qualified_name", pending.get("caller_qn")),
+                    "CALLS",
+                    (callee_type, "qualified_name", callee_qn),
+                )
+            else:
+                remaining.append(pending)
+
+        self.ingestor.replace_pending_calls(remaining)
 
     @staticmethod
     def _extract_vue_script_content(file_path: Path) -> tuple[str, bytes] | None:
