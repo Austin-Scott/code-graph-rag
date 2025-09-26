@@ -251,6 +251,7 @@ LANGUAGE_CONFIGS = {
             name: (identifier) @name) @call
         (object_creation_expression
             type: (type_identifier) @name) @call
+        (method_reference) @call
         """,
     ),
     "cpp": create_lang_config(

@@ -681,3 +681,199 @@ public class StaticMethodCalls {
     ]
 
     assert len(call_relationships) > 0, "No static method call relationships found"
+
+
+def test_nested_lambda_calls_recorded(
+    java_methods_project: Path,
+    mock_ingestor: MagicMock,
+) -> None:
+    """Nested lambda expressions should still record method calls within them."""
+
+    lambda_file = (
+        java_methods_project
+        / "src"
+        / "main"
+        / "java"
+        / "com"
+        / "example"
+        / "LambdaNested.java"
+    )
+    lambda_file.write_text(
+        """
+package com.example;
+
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+public class LambdaNested {
+    public void execute() {
+        Function<Integer, Supplier<String>> nested = value -> () -> formatValue(value);
+        Supplier<String> supplier = nested.apply(5);
+        supplier.get();
+    }
+
+    private String formatValue(int value) {
+        return "Value: " + value;
+    }
+}
+"""
+    )
+
+    parsers, queries = load_parsers()
+    if "java" not in parsers:
+        pytest.skip("Java parser not available")
+
+    updater = GraphUpdater(
+        ingestor=mock_ingestor,
+        repo_path=java_methods_project,
+        parsers=parsers,
+        queries=queries,
+    )
+    updater.run()
+
+    project_name = java_methods_project.name
+    base_module = f"{project_name}.src.main.java.com.example.LambdaNested"
+    expected_caller = (
+        "Method",
+        "qualified_name",
+        f"{base_module}.LambdaNested.execute",
+    )
+    expected_callee = (
+        "Method",
+        "qualified_name",
+        f"{base_module}.LambdaNested.formatValue",
+    )
+
+    call_relationships = [
+        c
+        for c in mock_ingestor.ensure_relationship_batch.call_args_list
+        if len(c.args) > 1 and c.args[1] == "CALLS"
+    ]
+
+    assert any(
+        call.args[0] == expected_caller
+        and call.args[2][0] == "Method"
+        and call.args[2][2].startswith(
+            f"{base_module}.LambdaNested.formatValue"
+        )
+        for call in call_relationships
+    ), "Expected CALLS relationship from execute() to formatValue() inside nested lambda"
+
+
+def test_method_reference_calls_resolved(
+    java_methods_project: Path,
+    mock_ingestor: MagicMock,
+) -> None:
+    """Method references should create call relationships to their targets."""
+
+    helper_file = (
+        java_methods_project
+        / "src"
+        / "main"
+        / "java"
+        / "com"
+        / "example"
+        / "MethodReferenceHelper.java"
+    )
+    helper_file.write_text(
+        """
+package com.example;
+
+public class MethodReferenceHelper {
+    public void log(String value) {}
+
+    public String supply() {
+        return value();
+    }
+
+    public static Integer create() {
+        return Integer.valueOf(1);
+    }
+
+    private String value() {
+        return "";
+    }
+}
+"""
+    )
+
+    calls_file = (
+        java_methods_project
+        / "src"
+        / "main"
+        / "java"
+        / "com"
+        / "example"
+        / "MethodReferenceCalls.java"
+    )
+    calls_file.write_text(
+        """
+package com.example;
+
+import java.util.List;
+import java.util.function.Supplier;
+
+public class MethodReferenceCalls {
+    public String transform(String value) {
+        return value.trim();
+    }
+
+    public void process(List<String> values, MethodReferenceHelper helper) {
+        values.stream()
+            .map(this::transform)
+            .forEach(helper::log);
+
+        Supplier<String> supplier = helper::supply;
+        Supplier<Integer> creator = MethodReferenceHelper::create;
+
+        supplier.get();
+        creator.get();
+    }
+}
+"""
+    )
+
+    parsers, queries = load_parsers()
+    if "java" not in parsers:
+        pytest.skip("Java parser not available")
+
+    updater = GraphUpdater(
+        ingestor=mock_ingestor,
+        repo_path=java_methods_project,
+        parsers=parsers,
+        queries=queries,
+    )
+    updater.run()
+
+    project_name = java_methods_project.name
+    calls_module = f"{project_name}.src.main.java.com.example.MethodReferenceCalls"
+    helper_module = f"{project_name}.src.main.java.com.example.MethodReferenceHelper"
+
+    expectations = [
+        (
+            ("Method", "qualified_name", f"{calls_module}.MethodReferenceCalls.process"),
+            f"{calls_module}.MethodReferenceCalls.transform",
+        ),
+        (
+            ("Method", "qualified_name", f"{calls_module}.MethodReferenceCalls.process"),
+            f"{helper_module}.MethodReferenceHelper.log",
+        ),
+        (
+            ("Method", "qualified_name", f"{calls_module}.MethodReferenceCalls.process"),
+            f"{helper_module}.MethodReferenceHelper.create",
+        ),
+    ]
+
+    call_relationships = [
+        c
+        for c in mock_ingestor.ensure_relationship_batch.call_args_list
+        if len(c.args) > 1 and c.args[1] == "CALLS"
+    ]
+
+    for expected_caller, expected_callee_prefix in expectations:
+        assert any(
+            call.args[0] == expected_caller
+            and call.args[2][0] == "Method"
+            and call.args[2][2].startswith(expected_callee_prefix)
+            for call in call_relationships
+        ), f"Missing method reference call to prefix {expected_callee_prefix}"

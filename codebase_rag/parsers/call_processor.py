@@ -15,6 +15,7 @@ from .cpp_utils import convert_operator_symbol_to_name, extract_cpp_function_nam
 from .import_processor import ImportProcessor
 from .python_utils import resolve_class_name
 from .type_inference import TypeInferenceEngine
+from .utils import safe_decode_text
 
 
 class CallProcessor:
@@ -113,6 +114,7 @@ class CallProcessor:
         self.import_processor = import_processor
         self.type_inference = type_inference
         self.class_inheritance = class_inheritance
+        self._cross_project_lookup_cache: dict[str, tuple[str, str] | None] = {}
 
     def process_calls_in_file(
         self, file_path: Path, root_node: Node, language: str, queries: dict[str, Any]
@@ -318,6 +320,143 @@ class CallProcessor:
 
         return None
 
+    def _extract_java_method_reference_parts(
+        self, reference_node: Node
+    ) -> tuple[str | None, str | None]:
+        """Extract the object expression and method name from a Java method reference."""
+
+        if reference_node.type != "method_reference":
+            return None, None
+
+        # Tree-sitter Java represents method_reference as:
+        #   object_expression '::' type_arguments? identifier|new
+        meaningful_children = [
+            child for child in reference_node.children if child.type != "::"
+        ]
+        if len(meaningful_children) < 2:
+            return None, None
+
+        object_node = meaningful_children[0]
+        method_node: Node | None = None
+
+        for child in reversed(meaningful_children[1:]):
+            if child.type == "type_arguments":
+                continue
+            method_node = child
+            break
+
+        object_text = safe_decode_text(object_node)
+        method_text = safe_decode_text(method_node) if method_node else None
+        return object_text, method_text
+
+    @staticmethod
+    def _normalize_java_method_reference_object(object_text: str | None) -> str:
+        """Normalize the object portion of a method reference for resolution."""
+
+        if not object_text:
+            return ""
+
+        text = object_text.strip()
+
+        # Remove wrapping parentheses around expressions like (new Helper())
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1].strip()
+
+        # Drop generic arguments
+        text = re.sub(r"<[^<>]*>", "", text)
+
+        # Handle constructor expressions "new Helper()"
+        if text.startswith("new "):
+            text = text[4:]
+
+        # Remove trailing invocation parentheses from expressions
+        if "(" in text:
+            text = text.split("(", 1)[0]
+
+        return text.strip().replace(" ", "")
+
+    def _process_java_method_reference(
+        self,
+        reference_node: Node,
+        caller_qn: str,
+        caller_type: str,
+        module_qn: str,
+        local_var_types: dict[str, str] | None,
+        class_context: str | None,
+    ) -> None:
+        """Resolve and record call relationships for Java method references."""
+
+        object_text, method_name = self._extract_java_method_reference_parts(
+            reference_node
+        )
+        if not method_name:
+            return
+
+        normalized_object = self._normalize_java_method_reference_object(object_text)
+
+        call_name_candidates: list[str] = []
+        if normalized_object:
+            call_name_candidates.append(f"{normalized_object}.{method_name}")
+
+            # Constructor references use "::new" but constructors are stored as ClassName.ClassName
+            if method_name == "new":
+                simple_name = normalized_object.split(".")[-1]
+                simple_name = simple_name.replace("[]", "")
+                if simple_name:
+                    call_name_candidates.append(
+                        f"{normalized_object}.{simple_name}"
+                    )
+
+            if class_context and normalized_object in {"this", "super"}:
+                call_name_candidates.append(f"{class_context}.{method_name}")
+        else:
+            call_name_candidates.append(method_name)
+
+        unresolved_candidates: list[str] = []
+
+        java_engine = self.type_inference.java_type_inference
+        callee_info = java_engine.resolve_java_method_reference(
+            reference_node,
+            local_var_types or {},
+            module_qn,
+            class_context,
+        )
+
+        chosen_call_name = call_name_candidates[0] if call_name_candidates else method_name
+
+        if not callee_info:
+            for candidate in call_name_candidates:
+                callee_info = self._resolve_function_call(
+                    candidate,
+                    module_qn,
+                    local_var_types,
+                    class_context,
+                    unresolved_candidates,
+                )
+                if callee_info:
+                    chosen_call_name = candidate
+                    break
+
+        if not callee_info:
+            pending_name = chosen_call_name or method_name or ""
+            if pending_name:
+                self._record_pending_call(
+                    caller_type,
+                    caller_qn,
+                    module_qn,
+                    pending_name,
+                    unresolved_candidates,
+                )
+            return
+
+        callee_type, callee_qn = callee_info
+
+        self.ingestor.ensure_relationship_batch(
+            (caller_type, "qualified_name", caller_qn),
+            "CALLS",
+            (callee_type, "qualified_name", callee_qn),
+        )
+
     def _get_iife_target_name(self, parenthesized_expr: Node) -> str | None:
         """Extract the target name for IIFE calls like (function(){})()."""
         # Look for function_expression or arrow_function inside parentheses
@@ -361,6 +500,17 @@ class CallProcessor:
             if not isinstance(call_node, Node):
                 continue
 
+            if language == "java" and call_node.type == "method_reference":
+                self._process_java_method_reference(
+                    call_node,
+                    caller_qn,
+                    caller_type,
+                    module_qn,
+                    local_var_types,
+                    class_context,
+                )
+                continue
+
             # Process nested calls first (inner to outer)
             self._process_nested_calls_in_node(
                 call_node,
@@ -380,7 +530,7 @@ class CallProcessor:
             # Use Java-specific resolution for Java method calls
             if language == "java" and call_node.type == "method_invocation":
                 callee_info = self._resolve_java_method_call(
-                    call_node, module_qn, local_var_types
+                    call_node, module_qn, local_var_types, unresolved_candidates
                 )
             else:
                 callee_info = self._resolve_function_call(
@@ -1041,6 +1191,9 @@ class CallProcessor:
             candidates.update(self.function_registry.find_ending_with(colon_variant))
 
         if not candidates:
+            cross_project = self._lookup_cross_project_definition(imported_qn)
+            if cross_project:
+                return cross_project
             return None
 
         sorted_candidates = sorted(
@@ -1054,6 +1207,164 @@ class CallProcessor:
 
         best_qn = sorted_candidates[0]
         return self.function_registry[best_qn], best_qn
+
+    def _generate_cross_project_candidates(self, imported_qn: str) -> list[str]:
+        """Generate normalized qualified name candidates for cross-project lookup."""
+
+        base = imported_qn.strip()
+        if not base:
+            return []
+
+        if "(" in base:
+            base = base.split("(", 1)[0]
+
+        variants: set[str] = {base}
+
+        if "::" in base:
+            variants.add(base.replace("::", "."))
+
+        for variant in list(variants):
+            if "." in variant:
+                parts = variant.split(".")
+                method = parts[-1]
+                class_path = ".".join(parts[:-1])
+                if class_path:
+                    simple = class_path.split(".")[-1]
+                    variants.add(f"{class_path}.{simple}.{method}")
+
+        return [candidate for candidate in variants if candidate]
+
+    def _lookup_cross_project_definition(
+        self, imported_qn: str
+    ) -> tuple[str, str] | None:
+        """Query the ingested graph for definitions from other projects."""
+
+        if imported_qn in self._cross_project_lookup_cache:
+            return self._cross_project_lookup_cache[imported_qn]
+
+        if not hasattr(self.ingestor, "fetch_all"):
+            self._cross_project_lookup_cache[imported_qn] = None
+            return None
+
+        allowed_labels = [
+            "Function",
+            "Method",
+            "Constructor",
+            "Class",
+            "Interface",
+            "Struct",
+            "Trait",
+            "Enum",
+            "Type",
+            "Union",
+        ]
+
+        candidates = self._generate_cross_project_candidates(imported_qn)
+
+        for candidate in candidates:
+            try:
+                rows = self.ingestor.fetch_all(
+                    (
+                        "MATCH (n) "
+                        "WHERE n.qualified_name = $qualified_name "
+                        "AND any(label IN labels(n) WHERE label IN $allowed_labels) "
+                        "RETURN n.qualified_name AS qualified_name, labels(n) AS labels"
+                    ),
+                    {
+                        "qualified_name": candidate,
+                        "allowed_labels": allowed_labels,
+                    },
+                )
+            except Exception:
+                rows = []
+
+            resolved = self._select_cross_project_candidate(
+                rows, allowed_labels, exact_match=candidate
+            )
+            if resolved:
+                self._cross_project_lookup_cache[imported_qn] = resolved
+                return resolved
+
+        for candidate in candidates:
+            suffix = candidate
+            if not suffix.startswith("."):
+                suffix = f".{suffix}"
+
+            try:
+                rows = self.ingestor.fetch_all(
+                    (
+                        "MATCH (n) "
+                        "WHERE n.qualified_name ENDS WITH $suffix "
+                        "AND any(label IN labels(n) WHERE label IN $allowed_labels) "
+                        "RETURN n.qualified_name AS qualified_name, labels(n) AS labels"
+                    ),
+                    {"suffix": suffix, "allowed_labels": allowed_labels},
+                )
+            except Exception:
+                rows = []
+
+            resolved = self._select_cross_project_candidate(
+                rows, allowed_labels, suffix=suffix
+            )
+            if resolved:
+                self._cross_project_lookup_cache[imported_qn] = resolved
+                return resolved
+
+        self._cross_project_lookup_cache[imported_qn] = None
+        return None
+
+    @staticmethod
+    def _select_cross_project_candidate(
+        rows: Any,
+        allowed_labels: list[str],
+        *,
+        exact_match: str | None = None,
+        suffix: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Pick a matching definition from raw database rows."""
+
+        if not isinstance(rows, list):
+            return None
+
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+
+            qualified_name = row.get("qualified_name")
+            labels = row.get("labels") or []
+
+            if not isinstance(qualified_name, str):
+                continue
+
+            normalized_qn = qualified_name
+            if "(" in normalized_qn:
+                normalized_qn = normalized_qn.split("(", 1)[0]
+
+            if exact_match:
+                if not (
+                    normalized_qn == exact_match
+                    or normalized_qn.endswith(exact_match)
+                    or qualified_name == exact_match
+                ):
+                    continue
+
+            if suffix:
+                normalized_suffix = suffix
+                if not (
+                    qualified_name.endswith(suffix)
+                    or normalized_qn.endswith(normalized_suffix)
+                ):
+                    continue
+
+            node_type = next(
+                (label for label in labels if label in allowed_labels), None
+            )
+            if not node_type:
+                continue
+
+            return node_type, qualified_name
+
+        return None
 
     def _normalize_class_qn(self, class_qn: str | None, module_qn: str) -> str:
         """Normalize class qualified names using the registry for cross-project lookups."""
@@ -1234,6 +1545,7 @@ class CallProcessor:
         call_node: Node,
         module_qn: str,
         local_var_types: dict[str, str],
+        unresolved_candidates: list[str] | None = None,
     ) -> tuple[str, str] | None:
         """Resolve Java method calls using the JavaTypeInferenceEngine."""
         # Get the Java type inference engine from the main type inference engine
@@ -1241,7 +1553,7 @@ class CallProcessor:
 
         # Use the Java engine to resolve the method call
         result = java_engine.resolve_java_method_call(
-            call_node, local_var_types, module_qn
+            call_node, local_var_types, module_qn, unresolved_candidates
         )
 
         if result:

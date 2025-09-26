@@ -1,5 +1,6 @@
 """Java-specific type inference engine using tree-sitter for precise semantic analysis."""
 
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -676,8 +677,50 @@ class JavaTypeInferenceEngine:
         ] in ["Class", "Interface"]:
             return same_package_qn
 
+        # Attempt to resolve fully qualified names by suffix matching
+        normalized = type_name.strip()
+        if normalized:
+            suffixes = [normalized]
+            if "." in normalized:
+                simple = normalized.split(".")[-1]
+                suffixes.append(f"{normalized}.{simple}")
+
+            for suffix in suffixes:
+                for candidate in self.function_registry.find_ending_with(suffix):
+                    node_type = self.function_registry[candidate]
+                    if node_type in [
+                        "Class",
+                        "Interface",
+                        "Enum",
+                        "Type",
+                        "Union",
+                    ]:
+                        return candidate
+
         # Fallback: return as-is (might be a simple class name)
         return type_name
+
+    @staticmethod
+    def _normalize_method_reference_object(object_text: str | None) -> str:
+        """Normalize the object expression from a method reference."""
+
+        if not object_text:
+            return ""
+
+        text = object_text.strip()
+
+        if text.startswith("(") and text.endswith(")"):
+            text = text[1:-1].strip()
+
+        text = re.sub(r"<[^<>]*>", "", text)
+
+        if text.startswith("new "):
+            text = text[4:]
+
+        if "(" in text:
+            text = text.split("(", 1)[0]
+
+        return text.strip().replace(" ", "")
 
     def _find_containing_java_class(self, node: Node) -> Node | None:
         """Find the Java class that contains the given node."""
@@ -694,7 +737,11 @@ class JavaTypeInferenceEngine:
         return None
 
     def resolve_java_method_call(
-        self, call_node: Node, local_var_types: dict[str, str], module_qn: str
+        self,
+        call_node: Node,
+        local_var_types: dict[str, str],
+        module_qn: str,
+        unresolved_candidates: list[str] | None = None,
     ) -> tuple[str, str] | None:
         """
         Resolve a Java method invocation to its qualified name and type.
@@ -725,6 +772,15 @@ class JavaTypeInferenceEngine:
         )
 
         # Case 1: Static method call or call without object (e.g., "method()" or "Class.method()")
+        def add_candidate(candidate: str) -> None:
+            if unresolved_candidates is None:
+                return
+            candidate = candidate.strip()
+            if not candidate:
+                return
+            if candidate not in unresolved_candidates:
+                unresolved_candidates.append(candidate)
+
         if not object_ref:
             logger.debug(f"Resolving static/local method: {method_name}")
             result = self._resolve_static_or_local_method(str(method_name), module_qn)
@@ -742,16 +798,92 @@ class JavaTypeInferenceEngine:
         )
         if not object_type:
             logger.debug(f"Could not determine type of object: {object_ref}")
-            return None
+            add_candidate(f"{object_ref}.{method_name}")
+            return self._resolve_static_or_local_method(method_name, module_qn)
 
         logger.debug(f"Object type resolved to: {object_type}")
+        add_candidate(f"{object_type}.{method_name}")
         # Now find the method in the object's class
         result = self._resolve_instance_method(object_type, str(method_name), module_qn)
         if result:
             logger.debug(f"Found instance method: {result}")
-        else:
-            logger.debug(f"Instance method not found: {object_type}.{method_name}")
-        return result
+            return result
+
+        logger.debug(f"Instance method not found: {object_type}.{method_name}")
+        return self._resolve_static_or_local_method(method_name, module_qn)
+
+    def resolve_java_method_reference(
+        self,
+        reference_node: Node,
+        local_var_types: dict[str, str],
+        module_qn: str,
+        class_context: str | None = None,
+    ) -> tuple[str, str] | None:
+        """Resolve Java method references (::) to concrete method definitions."""
+
+        if reference_node.type != "method_reference":
+            return None
+
+        meaningful_children = [
+            child for child in reference_node.children if child.type != "::"
+        ]
+        if len(meaningful_children) < 2:
+            return None
+
+        object_node = meaningful_children[0]
+        method_node: Node | None = None
+
+        for child in reversed(meaningful_children[1:]):
+            if child.type == "type_arguments":
+                continue
+            method_node = child
+            break
+
+        object_text = safe_decode_text(object_node)
+        method_name = safe_decode_text(method_node) if method_node else None
+
+        if not method_name:
+            return None
+
+        normalized_object = self._normalize_method_reference_object(object_text)
+
+        target_type: str | None = None
+
+        if method_name == "new" and normalized_object:
+            target_type = normalized_object
+        elif normalized_object in {"this", "super"}:
+            if normalized_object == "this" and class_context:
+                target_type = class_context
+            elif normalized_object == "super" and class_context:
+                target_type = self._find_parent_class(class_context)
+        elif normalized_object:
+            target_type = self._resolve_java_object_type(
+                normalized_object, local_var_types, module_qn
+            )
+
+        if not target_type and normalized_object:
+            resolved_type = self._resolve_java_type_name(normalized_object, module_qn)
+            if resolved_type != normalized_object or resolved_type in self.function_registry:
+                target_type = resolved_type
+
+        if not target_type and class_context:
+            target_type = class_context
+
+        if method_name == "new":
+            if not target_type:
+                return None
+            resolved_class = self._resolve_java_type_name(target_type, module_qn)
+            simple_name = resolved_class.split(".")[-1]
+            return self._find_method_with_any_signature(resolved_class, simple_name)
+
+        if target_type:
+            method_result = self._resolve_instance_method(
+                target_type, method_name, module_qn
+            )
+            if method_result:
+                return method_result
+
+        return self._resolve_static_or_local_method(method_name, module_qn)
 
     def _resolve_java_object_type(
         self, object_ref: str, local_var_types: dict[str, str], module_qn: str
@@ -794,6 +926,10 @@ class JavaTypeInferenceEngine:
             and self.function_registry[simple_class_qn] == "Class"
         ):
             return simple_class_qn
+
+        resolved_type = self._resolve_java_type_name(object_ref, module_qn)
+        if resolved_type != object_ref or resolved_type in self.function_registry:
+            return resolved_type
 
         return None
 
