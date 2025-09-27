@@ -526,6 +526,14 @@ class GraphUpdater:
         call_processor = self.factory.call_processor
 
         for pending in pending_calls:
+            if (
+                isinstance(pending, dict)
+                and str(pending.get("language", "")).lower() == "java"
+                and pending.get("caller_was_parsed") is False
+            ):
+                remaining.append(pending)
+                continue
+
             candidates = pending.get("candidates") or []
             module_qn = pending.get("module_qn", "")
             language = pending.get("language")
