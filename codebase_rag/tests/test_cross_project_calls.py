@@ -86,7 +86,7 @@ def test_cross_project_calls_create_edges(temp_repo: Path) -> None:
     library_updater.run()
 
     consumer_project = temp_repo / "consumer"
-    consumer_src = consumer_project / "src/main/java/com/example/app"
+    consumer_src = consumer_project / "src/main/java/com/microsoft/app"
     consumer_src.mkdir(parents=True, exist_ok=True)
     (consumer_src / "App.java").write_text(
         textwrap.dedent(
@@ -135,14 +135,14 @@ def test_cross_project_calls_resolve_after_dependency(temp_repo: Path) -> None:
     ingestor = InMemoryIngestor()
 
     consumer_project = temp_repo / "consumer"
-    consumer_src = consumer_project / "src/main/java/com/example/app"
+    consumer_src = consumer_project / "src/main/java/com/microsoft/app"
     consumer_src.mkdir(parents=True, exist_ok=True)
     (consumer_src / "App.java").write_text(
         textwrap.dedent(
             """
-            package com.example.app;
+            package com.microsoft.app;
 
-            import io.fjord.telemetry.TelemetryProvider;
+            import com.microsoft.telemetry.TelemetryProvider;
 
             public class App {
                 private final TelemetryProvider telemetryProvider;
@@ -161,6 +161,100 @@ def test_cross_project_calls_resolve_after_dependency(temp_repo: Path) -> None:
 
     consumer_updater = GraphUpdater(ingestor, consumer_project, parsers, queries)
     consumer_updater.run()
+
+    library_project = temp_repo / "microsoft-telemetry"
+    library_src = library_project / "src/main/java/com/microsoft/telemetry"
+    library_src.mkdir(parents=True, exist_ok=True)
+    (library_src / "TelemetryProvider.java").write_text(
+        textwrap.dedent(
+            """
+            package com.microsoft.telemetry;
+
+            import com.microsoft.telemetry.dto.LocationDTO;
+
+            public interface TelemetryProvider {
+                LocationDTO resolveCoordinate(
+                    LocationDTO locationDTO,
+                    int observerSiteId,
+                    int observerUnitId
+                );
+            }
+            """
+        ).strip()
+    )
+
+    dto_src = library_project / "src/main/java/com/microsoft/telemetry/dto"
+    dto_src.mkdir(parents=True, exist_ok=True)
+    (dto_src / "LocationDTO.java").write_text(
+        textwrap.dedent(
+            """
+            package com.microsoft.telemetry.dto;
+
+            public record LocationDTO(double lat, double lon) {}
+            """
+        ).strip()
+    )
+
+    library_updater = GraphUpdater(ingestor, library_project, parsers, queries)
+    library_updater.run()
+
+    expected_caller = (
+        "Method",
+        "qualified_name",
+        f"{consumer_project.name}.src.main.java.com.microsoft.app.App.App.run",
+    )
+
+    telemetry_interface_suffix = (
+        "microsoft.telemetry.TelemetryProvider.TelemetryProvider.resolveCoordinate"
+    )
+
+    call_relationships = [
+        rel for rel in ingestor.relationships if rel[1] == "CALLS"
+    ]
+
+    assert any(
+        rel[0] == expected_caller
+        and rel[2][0] == "Method"
+        and telemetry_interface_suffix in rel[2][2]
+        for rel in call_relationships
+    ), "Expected CALLS relationship after dependency ingestion"
+
+
+def test_cross_project_calls_ignore_third_party(temp_repo: Path) -> None:
+    """Cross-project Java calls should be ignored for non-first-party packages."""
+
+    parsers, queries = load_parsers()
+    if "java" not in parsers:
+        pytest.skip("Java parser not available in this environment")
+
+    ingestor = InMemoryIngestor()
+
+    consumer_project = temp_repo / "consumer"
+    consumer_src = consumer_project / "src/main/java/com/microsoft/app"
+    consumer_src.mkdir(parents=True, exist_ok=True)
+    (consumer_src / "App.java").write_text(
+        textwrap.dedent(
+            """
+            package com.microsoft.app;
+
+            import io.fjord.telemetry.TelemetryProvider;
+
+            public class App {
+                private final TelemetryProvider telemetryProvider;
+
+                public App(TelemetryProvider telemetryProvider) {
+                    this.telemetryProvider = telemetryProvider;
+                }
+
+                public void run() {
+                    telemetryProvider.resolveCoordinate(null, 1, 2);
+                }
+            }
+            """
+        ).strip()
+    )
+
+    GraphUpdater(ingestor, consumer_project, parsers, queries).run()
 
     library_project = temp_repo / "fjord-telemetry-adapter"
     library_src = library_project / "src/main/java/io/fjord/telemetry"
@@ -183,41 +277,22 @@ def test_cross_project_calls_resolve_after_dependency(temp_repo: Path) -> None:
         ).strip()
     )
 
-    dto_src = library_project / "src/main/java/io/fjord/telemetry/dto"
-    dto_src.mkdir(parents=True, exist_ok=True)
-    (dto_src / "LocationDTO.java").write_text(
-        textwrap.dedent(
-            """
-            package io.fjord.telemetry.dto;
-
-            public record LocationDTO(double lat, double lon) {}
-            """
-        ).strip()
-    )
-
-    library_updater = GraphUpdater(ingestor, library_project, parsers, queries)
-    library_updater.run()
+    GraphUpdater(ingestor, library_project, parsers, queries).run()
 
     expected_caller = (
         "Method",
         "qualified_name",
-        f"{consumer_project.name}.src.main.java.com.example.app.App.App.run",
-    )
-
-    telemetry_interface_suffix = (
-        "fjord.telemetry.TelemetryProvider.TelemetryProvider.resolveCoordinate"
+        f"{consumer_project.name}.src.main.java.com.microsoft.app.App.App.run",
     )
 
     call_relationships = [
         rel for rel in ingestor.relationships if rel[1] == "CALLS"
     ]
 
-    assert any(
-        rel[0] == expected_caller
-        and rel[2][0] == "Method"
-        and telemetry_interface_suffix in rel[2][2]
+    assert not any(
+        rel[0] == expected_caller and rel[2][0] == "Method"
         for rel in call_relationships
-    ), "Expected CALLS relationship after dependency ingestion"
+    ), "Did not expect CALLS relationship for third-party package"
 
 
 def test_cross_project_calls_with_fully_qualified_name(temp_repo: Path) -> None:
