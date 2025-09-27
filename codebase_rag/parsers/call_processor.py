@@ -431,6 +431,7 @@ class CallProcessor:
                 callee_info = self._resolve_function_call(
                     candidate,
                     module_qn,
+                    "java",
                     local_var_types,
                     class_context,
                     unresolved_candidates,
@@ -448,6 +449,7 @@ class CallProcessor:
                     module_qn,
                     pending_name,
                     unresolved_candidates,
+                    "java",
                 )
             return
 
@@ -519,6 +521,7 @@ class CallProcessor:
                 caller_qn,
                 caller_type,
                 module_qn,
+                language,
                 local_var_types,
                 class_context,
             )
@@ -538,6 +541,7 @@ class CallProcessor:
                 callee_info = self._resolve_function_call(
                     call_name,
                     module_qn,
+                    language,
                     local_var_types,
                     class_context,
                     unresolved_candidates,
@@ -557,6 +561,7 @@ class CallProcessor:
                             module_qn,
                             call_name,
                             unresolved_candidates,
+                            language,
                         )
                         continue
                     callee_type, callee_qn = operator_info
@@ -581,6 +586,7 @@ class CallProcessor:
         caller_qn: str,
         caller_type: str,
         module_qn: str,
+        language: str,
         local_var_types: dict[str, str] | None,
         class_context: str | None,
     ) -> None:
@@ -598,6 +604,7 @@ class CallProcessor:
                 caller_qn,
                 caller_type,
                 module_qn,
+                language,
                 local_var_types,
                 class_context,
             )
@@ -608,6 +615,7 @@ class CallProcessor:
         caller_qn: str,
         caller_type: str,
         module_qn: str,
+        language: str,
         local_var_types: dict[str, str] | None,
         class_context: str | None,
     ) -> None:
@@ -616,7 +624,13 @@ class CallProcessor:
         if node.type == "call":
             # First process any nested calls within this call
             self._process_nested_calls_in_node(
-                node, caller_qn, caller_type, module_qn, local_var_types, class_context
+                node,
+                caller_qn,
+                caller_type,
+                module_qn,
+                language,
+                local_var_types,
+                class_context,
             )
 
             # Then process this call itself
@@ -626,6 +640,7 @@ class CallProcessor:
                 callee_info = self._resolve_function_call(
                     call_name,
                     module_qn,
+                    language,
                     local_var_types,
                     class_context,
                     unresolved_candidates,
@@ -648,18 +663,26 @@ class CallProcessor:
                         module_qn,
                         call_name,
                         unresolved_candidates,
+                        language,
                     )
 
         # Recursively search in all child nodes
         for child in node.children:
             self._find_and_process_nested_calls(
-                child, caller_qn, caller_type, module_qn, local_var_types, class_context
+                child,
+                caller_qn,
+                caller_type,
+                module_qn,
+                language,
+                local_var_types,
+                class_context,
             )
 
     def _resolve_function_call(
         self,
         call_name: str,
         module_qn: str,
+        language: str,
         local_var_types: dict[str, str] | None = None,
         class_context: str | None = None,
         unresolved_candidates: list[str] | None = None,
@@ -697,7 +720,9 @@ class CallProcessor:
 
         # Phase 0.5: Handle method chaining - check if this is a chained call
         if "." in call_name and self._is_method_chain(call_name):
-            return self._resolve_chained_call(call_name, module_qn, local_var_types)
+            return self._resolve_chained_call(
+                call_name, module_qn, language, local_var_types
+            )
 
         # Phase 1: Check import mapping for 100% accurate resolution
         if module_qn in self.import_processor.import_mapping:
@@ -708,7 +733,7 @@ class CallProcessor:
                 imported_qn = import_map[call_name]
                 register_candidate(imported_qn)
                 resolved = self._resolve_registered_qualified_name(
-                    imported_qn, module_qn
+                    imported_qn, module_qn, language
                 )
                 if resolved:
                     callee_type, callee_qn = resolved
@@ -738,12 +763,14 @@ class CallProcessor:
                             )
                             class_qn = class_qn_or_none if class_qn_or_none else ""
 
-                        class_qn = self._normalize_class_qn(class_qn, module_qn)
+                        class_qn = self._normalize_class_qn(
+                            class_qn, module_qn, language
+                        )
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
                             register_candidate(method_qn)
                             resolved_method = self._resolve_registered_qualified_name(
-                                method_qn, module_qn
+                                method_qn, module_qn, language
                             )
                             if resolved_method:
                                 logger.debug(
@@ -800,12 +827,14 @@ class CallProcessor:
                             )
                             class_qn = class_qn_or_none if class_qn_or_none else ""
 
-                        class_qn = self._normalize_class_qn(class_qn, module_qn)
+                        class_qn = self._normalize_class_qn(
+                            class_qn, module_qn, language
+                        )
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
                             register_candidate(method_qn)
                             resolved_method = self._resolve_registered_qualified_name(
-                                method_qn, module_qn
+                                method_qn, module_qn, language
                             )
                             if resolved_method:
                                 logger.debug(
@@ -834,11 +863,13 @@ class CallProcessor:
                     # Check if the class is imported
                     if class_name in import_map:
                         class_qn = import_map[class_name]
-                        class_qn = self._normalize_class_qn(class_qn, module_qn)
+                        class_qn = self._normalize_class_qn(
+                            class_qn, module_qn, language
+                        )
                         method_qn = f"{class_qn}.{method_name}"
                         register_candidate(method_qn)
                         resolved_method = self._resolve_registered_qualified_name(
-                            method_qn, module_qn
+                            method_qn, module_qn, language
                         )
                         if resolved_method:
                             logger.debug(
@@ -861,12 +892,14 @@ class CallProcessor:
                             )
                             class_qn = class_qn_or_none if class_qn_or_none else ""
 
-                        class_qn = self._normalize_class_qn(class_qn, module_qn)
+                        class_qn = self._normalize_class_qn(
+                            class_qn, module_qn, language
+                        )
                         if class_qn:
                             method_qn = f"{class_qn}.{method_name}"
                             register_candidate(method_qn)
                             resolved_method = self._resolve_registered_qualified_name(
-                                method_qn, module_qn
+                                method_qn, module_qn, language
                             )
                             if resolved_method:
                                 logger.debug(
@@ -907,7 +940,7 @@ class CallProcessor:
                     for wildcard_qn in potential_qns:
                         register_candidate(wildcard_qn)
                         resolved_method = self._resolve_registered_qualified_name(
-                            wildcard_qn, module_qn
+                            wildcard_qn, module_qn, language
                         )
                         if resolved_method:
                             logger.debug(
@@ -960,6 +993,7 @@ class CallProcessor:
         module_qn: str,
         call_name: str,
         candidates: list[str],
+        language: str | None = None,
     ) -> None:
         """Persist unresolved calls for future resolution."""
 
@@ -989,6 +1023,9 @@ class CallProcessor:
             "project_name": self.project_name,
             "candidates": normalized_candidates,
         }
+
+        if language:
+            payload["language"] = language
 
         self.ingestor.record_pending_call(payload)
 
@@ -1110,6 +1147,7 @@ class CallProcessor:
         self,
         call_name: str,
         module_qn: str,
+        language: str,
         local_var_types: dict[str, str] | None = None,
     ) -> tuple[str, str] | None:
         """Resolve chained method calls like obj.method().other_method()."""
@@ -1144,12 +1182,14 @@ class CallProcessor:
                 if resolved_class:
                     full_object_type = resolved_class
 
-            full_object_type = self._normalize_class_qn(full_object_type, module_qn)
+            full_object_type = self._normalize_class_qn(
+                full_object_type, module_qn, language
+            )
             # Now resolve the final method call on that type
             method_qn = f"{full_object_type}.{final_method}"
 
             resolved_method = self._resolve_registered_qualified_name(
-                method_qn, module_qn
+                method_qn, module_qn, language
             )
             if resolved_method:
                 logger.debug(
@@ -1172,7 +1212,7 @@ class CallProcessor:
         return None
 
     def _resolve_registered_qualified_name(
-        self, imported_qn: str, module_qn: str
+        self, imported_qn: str, module_qn: str, language: str | None = None
     ) -> tuple[str, str] | None:
         """Resolve a qualified name using the known registry (with suffix matching)."""
 
@@ -1193,11 +1233,12 @@ class CallProcessor:
             candidates.update(self.function_registry.find_ending_with(colon_variant))
 
         if not candidates:
-            cross_project = self._lookup_cross_project_definition(
-                imported_qn, module_qn
-            )
-            if cross_project:
-                return cross_project
+            if language and language.lower() == "java":
+                cross_project = self._lookup_cross_project_definition(
+                    imported_qn, module_qn
+                )
+                if cross_project:
+                    return cross_project
             return None
 
         sorted_candidates = sorted(
@@ -1415,13 +1456,15 @@ class CallProcessor:
 
         return ".".join(package_parts[:segments])
 
-    def _normalize_class_qn(self, class_qn: str | None, module_qn: str) -> str:
+    def _normalize_class_qn(
+        self, class_qn: str | None, module_qn: str, language: str | None = None
+    ) -> str:
         """Normalize class qualified names using the registry for cross-project lookups."""
 
         if not class_qn:
             return ""
 
-        resolved = self._resolve_registered_qualified_name(class_qn, module_qn)
+        resolved = self._resolve_registered_qualified_name(class_qn, module_qn, language)
         if resolved and resolved[0] in self._CLASS_NODE_TYPES:
             return resolved[1]
         return class_qn

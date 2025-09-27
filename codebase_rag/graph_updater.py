@@ -528,18 +528,19 @@ class GraphUpdater:
         for pending in pending_calls:
             candidates = pending.get("candidates") or []
             module_qn = pending.get("module_qn", "")
+            language = pending.get("language")
             resolved: tuple[str, str] | None = None
 
             for candidate in candidates:
                 resolved = call_processor._resolve_registered_qualified_name(
-                    candidate, module_qn
+                    candidate, module_qn, language
                 )
                 if resolved:
                     break
 
             if not resolved and pending.get("call_name"):
                 resolved = call_processor._resolve_registered_qualified_name(
-                    pending["call_name"], module_qn
+                    pending["call_name"], module_qn, language
                 )
 
             if resolved:
