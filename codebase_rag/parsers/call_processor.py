@@ -455,10 +455,8 @@ class CallProcessor:
 
         callee_type, callee_qn = callee_info
 
-        self.ingestor.ensure_relationship_batch(
-            (caller_type, "qualified_name", caller_qn),
-            "CALLS",
-            (callee_type, "qualified_name", callee_qn),
+        self._emit_call_relationship(
+            caller_type, caller_qn, callee_type, callee_qn
         )
 
     def _get_iife_target_name(self, parenthesized_expr: Node) -> str | None:
@@ -574,10 +572,8 @@ class CallProcessor:
                 f"(resolved as {callee_type}:{callee_qn})"
             )
 
-            self.ingestor.ensure_relationship_batch(
-                (caller_type, "qualified_name", caller_qn),
-                "CALLS",
-                (callee_type, "qualified_name", callee_qn),
+            self._emit_call_relationship(
+                caller_type, caller_qn, callee_type, callee_qn
             )
 
     def _process_nested_calls_in_node(
@@ -651,10 +647,8 @@ class CallProcessor:
                         f"      Found nested call from {caller_qn} to {call_name} "
                         f"(resolved as {callee_type}:{callee_qn})"
                     )
-                    self.ingestor.ensure_relationship_batch(
-                        (caller_type, "qualified_name", caller_qn),
-                        "CALLS",
-                        (callee_type, "qualified_name", callee_qn),
+                    self._emit_call_relationship(
+                        caller_type, caller_qn, callee_type, callee_qn
                     )
                 else:
                     self._record_pending_call(
@@ -1022,6 +1016,7 @@ class CallProcessor:
             "call_name": call_name,
             "project_name": self.project_name,
             "candidates": normalized_candidates,
+            "caller_was_parsed": caller_qn in self.function_registry,
         }
 
         if language:
@@ -1063,6 +1058,48 @@ class CallProcessor:
             return ("Function", base_call)
 
         return None
+
+    def _emit_call_relationship(
+        self,
+        caller_type: str,
+        caller_qn: str,
+        callee_type: str,
+        callee_qn: str,
+    ) -> None:
+        """Create a CALLS relationship if it complies with cross-project rules."""
+
+        if self._should_skip_cross_project_edge(caller_qn, callee_qn):
+            logger.debug(
+                "Skipping cross-project CALLS edge from %s to %s due to unparsed caller",
+                caller_qn,
+                callee_qn,
+            )
+            return
+
+        self.ingestor.ensure_relationship_batch(
+            (caller_type, "qualified_name", caller_qn),
+            "CALLS",
+            (callee_type, "qualified_name", callee_qn),
+        )
+
+    def _should_skip_cross_project_edge(
+        self, caller_qn: str, callee_qn: str
+    ) -> bool:
+        """Determine if a cross-project Java edge should be suppressed."""
+
+        if not callee_qn:
+            return False
+
+        if callee_qn.startswith("builtin."):
+            return False
+
+        if callee_qn.startswith(f"{self.project_name}."):
+            return False
+
+        if ".java." not in callee_qn:
+            return False
+
+        return caller_qn not in self.function_registry
 
     def _resolve_cpp_operator_call(
         self, call_name: str, module_qn: str
@@ -1309,61 +1346,91 @@ class CallProcessor:
         candidates = self._generate_cross_project_candidates(imported_qn)
 
         caller_prefix = self._extract_java_package_prefix(module_qn)
+        caller_two_word_prefix = self._normalize_java_two_word_prefix(caller_prefix)
 
-        for candidate in candidates:
+        if caller_two_word_prefix:
+            filtered_candidates: list[str] = []
+            for candidate in candidates:
+                candidate_prefix = self._extract_candidate_java_prefix(candidate)
+                candidate_two_word = self._normalize_java_two_word_prefix(
+                    candidate_prefix
+                )
+                if candidate_two_word == caller_two_word_prefix:
+                    filtered_candidates.append(candidate)
+            candidates = filtered_candidates
+
+        if not candidates:
+            self._cross_project_lookup_cache[cache_key] = None
+            return None
+
+        batch_size = 100
+
+        for start in range(0, len(candidates), batch_size):
+            batch = candidates[start : start + batch_size]
             try:
                 rows = self.ingestor.fetch_all(
                     (
                         "MATCH (n) "
-                        "WHERE n.qualified_name = $qualified_name "
+                        "WHERE n.qualified_name IN $qualified_names "
                         "AND any(label IN labels(n) WHERE label IN $allowed_labels) "
                         "RETURN n.qualified_name AS qualified_name, labels(n) AS labels"
                     ),
                     {
-                        "qualified_name": candidate,
+                        "qualified_names": batch,
                         "allowed_labels": allowed_labels,
                     },
                 )
             except Exception:
                 rows = []
 
-            resolved = self._select_cross_project_candidate(
-                rows,
-                allowed_labels,
-                exact_match=candidate,
-                caller_java_prefix=caller_prefix,
-            )
-            if resolved:
-                self._cross_project_lookup_cache[cache_key] = resolved
-                return resolved
+            for candidate in batch:
+                resolved = self._select_cross_project_candidate(
+                    rows,
+                    allowed_labels,
+                    exact_match=candidate,
+                    caller_java_prefix=caller_prefix,
+                )
+                if resolved:
+                    self._cross_project_lookup_cache[cache_key] = resolved
+                    return resolved
 
+        suffix_lookup = []
         for candidate in candidates:
-            suffix = candidate
-            if not suffix.startswith("."):
-                suffix = f".{suffix}"
+            suffix = candidate if candidate.startswith(".") else f".{candidate}"
+            suffix_lookup.append((candidate, suffix))
 
+        unique_suffixes = list({suffix for _, suffix in suffix_lookup})
+
+        for start in range(0, len(unique_suffixes), batch_size):
+            suffix_batch = unique_suffixes[start : start + batch_size]
             try:
                 rows = self.ingestor.fetch_all(
                     (
                         "MATCH (n) "
-                        "WHERE n.qualified_name ENDS WITH $suffix "
+                        "WHERE any(suffix IN $suffixes WHERE n.qualified_name ENDS WITH suffix) "
                         "AND any(label IN labels(n) WHERE label IN $allowed_labels) "
                         "RETURN n.qualified_name AS qualified_name, labels(n) AS labels"
                     ),
-                    {"suffix": suffix, "allowed_labels": allowed_labels},
+                    {"suffixes": suffix_batch, "allowed_labels": allowed_labels},
                 )
             except Exception:
                 rows = []
 
-            resolved = self._select_cross_project_candidate(
-                rows,
-                allowed_labels,
-                suffix=suffix,
-                caller_java_prefix=caller_prefix,
-            )
-            if resolved:
-                self._cross_project_lookup_cache[cache_key] = resolved
-                return resolved
+            if not rows:
+                continue
+
+            for candidate, suffix in suffix_lookup:
+                if suffix not in suffix_batch:
+                    continue
+                resolved = self._select_cross_project_candidate(
+                    rows,
+                    allowed_labels,
+                    suffix=suffix,
+                    caller_java_prefix=caller_prefix,
+                )
+                if resolved:
+                    self._cross_project_lookup_cache[cache_key] = resolved
+                    return resolved
 
         self._cross_project_lookup_cache[cache_key] = None
         return None
@@ -1416,10 +1483,16 @@ class CallProcessor:
                 candidate_prefix = CallProcessor._extract_java_package_prefix(
                     qualified_name
                 )
+                candidate_two_word = CallProcessor._normalize_java_two_word_prefix(
+                    candidate_prefix
+                )
+                caller_two_word = CallProcessor._normalize_java_two_word_prefix(
+                    caller_java_prefix
+                )
                 if (
-                    candidate_prefix is None
-                    or candidate_prefix.split(".")[:2]
-                    != caller_java_prefix.split(".")[:2]
+                    candidate_two_word is None
+                    or caller_two_word is None
+                    or candidate_two_word != caller_two_word
                 ):
                     continue
 
@@ -1432,6 +1505,47 @@ class CallProcessor:
             return node_type, qualified_name
 
         return None
+
+    @staticmethod
+    def _normalize_java_two_word_prefix(prefix: str | None) -> str | None:
+        """Normalize a Java package prefix down to its first two segments."""
+
+        if not prefix:
+            return None
+
+        parts = [part for part in prefix.split(".") if part]
+        if len(parts) < 2:
+            return None
+
+        return ".".join(parts[:2])
+
+    @staticmethod
+    def _extract_candidate_java_prefix(
+        candidate: str, segments: int = 2
+    ) -> str | None:
+        """Extract the Java package prefix from a candidate qualified name."""
+
+        if not candidate:
+            return None
+
+        if ".java." in candidate:
+            return CallProcessor._extract_java_package_prefix(candidate, segments)
+
+        base = candidate.split("(", 1)[0]
+        parts = [part for part in base.split(".") if part]
+
+        package_parts: list[str] = []
+        for part in parts:
+            if not part:
+                continue
+            if part[0].isupper():
+                break
+            package_parts.append(part)
+
+        if len(package_parts) < segments:
+            return None
+
+        return ".".join(package_parts[:segments])
 
     @staticmethod
     def _extract_java_package_prefix(qn: str, segments: int = 2) -> str | None:
