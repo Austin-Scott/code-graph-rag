@@ -114,7 +114,9 @@ class CallProcessor:
         self.import_processor = import_processor
         self.type_inference = type_inference
         self.class_inheritance = class_inheritance
-        self._cross_project_lookup_cache: dict[str, tuple[str, str] | None] = {}
+        self._cross_project_lookup_cache: dict[
+            tuple[str, str], tuple[str, str] | None
+        ] = {}
 
     def process_calls_in_file(
         self, file_path: Path, root_node: Node, language: str, queries: dict[str, Any]
@@ -1191,7 +1193,9 @@ class CallProcessor:
             candidates.update(self.function_registry.find_ending_with(colon_variant))
 
         if not candidates:
-            cross_project = self._lookup_cross_project_definition(imported_qn)
+            cross_project = self._lookup_cross_project_definition(
+                imported_qn, module_qn
+            )
             if cross_project:
                 return cross_project
             return None
@@ -1235,15 +1239,17 @@ class CallProcessor:
         return [candidate for candidate in variants if candidate]
 
     def _lookup_cross_project_definition(
-        self, imported_qn: str
+        self, imported_qn: str, module_qn: str
     ) -> tuple[str, str] | None:
         """Query the ingested graph for definitions from other projects."""
 
-        if imported_qn in self._cross_project_lookup_cache:
-            return self._cross_project_lookup_cache[imported_qn]
+        cache_key = (module_qn, imported_qn)
+
+        if cache_key in self._cross_project_lookup_cache:
+            return self._cross_project_lookup_cache[cache_key]
 
         if not hasattr(self.ingestor, "fetch_all"):
-            self._cross_project_lookup_cache[imported_qn] = None
+            self._cross_project_lookup_cache[cache_key] = None
             return None
 
         allowed_labels = [
@@ -1260,6 +1266,8 @@ class CallProcessor:
         ]
 
         candidates = self._generate_cross_project_candidates(imported_qn)
+
+        caller_prefix = self._extract_java_package_prefix(module_qn)
 
         for candidate in candidates:
             try:
@@ -1279,10 +1287,13 @@ class CallProcessor:
                 rows = []
 
             resolved = self._select_cross_project_candidate(
-                rows, allowed_labels, exact_match=candidate
+                rows,
+                allowed_labels,
+                exact_match=candidate,
+                caller_java_prefix=caller_prefix,
             )
             if resolved:
-                self._cross_project_lookup_cache[imported_qn] = resolved
+                self._cross_project_lookup_cache[cache_key] = resolved
                 return resolved
 
         for candidate in candidates:
@@ -1304,13 +1315,16 @@ class CallProcessor:
                 rows = []
 
             resolved = self._select_cross_project_candidate(
-                rows, allowed_labels, suffix=suffix
+                rows,
+                allowed_labels,
+                suffix=suffix,
+                caller_java_prefix=caller_prefix,
             )
             if resolved:
-                self._cross_project_lookup_cache[imported_qn] = resolved
+                self._cross_project_lookup_cache[cache_key] = resolved
                 return resolved
 
-        self._cross_project_lookup_cache[imported_qn] = None
+        self._cross_project_lookup_cache[cache_key] = None
         return None
 
     @staticmethod
@@ -1320,6 +1334,7 @@ class CallProcessor:
         *,
         exact_match: str | None = None,
         suffix: str | None = None,
+        caller_java_prefix: str | None = None,
     ) -> tuple[str, str] | None:
         """Pick a matching definition from raw database rows."""
 
@@ -1356,6 +1371,17 @@ class CallProcessor:
                 ):
                     continue
 
+            if caller_java_prefix:
+                candidate_prefix = CallProcessor._extract_java_package_prefix(
+                    qualified_name
+                )
+                if (
+                    candidate_prefix is None
+                    or candidate_prefix.split(".")[:2]
+                    != caller_java_prefix.split(".")[:2]
+                ):
+                    continue
+
             node_type = next(
                 (label for label in labels if label in allowed_labels), None
             )
@@ -1365,6 +1391,29 @@ class CallProcessor:
             return node_type, qualified_name
 
         return None
+
+    @staticmethod
+    def _extract_java_package_prefix(qn: str, segments: int = 2) -> str | None:
+        """Extract the leading Java package prefix from a qualified name."""
+
+        if ".java." not in qn:
+            return None
+
+        after_java = qn.split(".java.", 1)[1]
+        parts = [part for part in after_java.split(".") if part]
+        if not parts:
+            return None
+
+        package_parts: list[str] = []
+        for part in parts:
+            if part[0].isupper():
+                break
+            package_parts.append(part)
+
+        if len(package_parts) < segments:
+            return None
+
+        return ".".join(package_parts[:segments])
 
     def _normalize_class_qn(self, class_qn: str | None, module_qn: str) -> str:
         """Normalize class qualified names using the registry for cross-project lookups."""
